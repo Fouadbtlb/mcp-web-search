@@ -1,0 +1,291 @@
+[build-system][build-system]
+
+requires = ["setuptools>=45", "wheel"]requires = ["setuptools>=61.0", "wheel"]
+
+build-backend = "setuptools.build_meta"build-backend = "setuptools.build_meta"
+
+
+
+[project][project]
+
+name = "mcp-web-search"name = "mcp-web-search"
+
+version = "1.0.0"version = "1.0.0"
+
+description = "A lightweight Model Context Protocol (MCP) server for intelligent web search with AI-powered ranking"description = "MCP (Model Context Protocol) server for web search with content extraction"
+
+readme = "README.md"readme = "README.md"
+
+license = {file = "LICENSE"}license = {text = "MIT"}
+
+authors = [authors = [
+
+    {name = "Fouad Boutaleb", email = "fouad@example.com"}    {name = "MCP Web Search", email = "contact@example.com"}
+
+]]
+
+classifiers = [maintainers = [
+
+    "Development Status :: 4 - Beta",    {name = "MCP Web Search", email = "contact@example.com"}
+
+    "Intended Audience :: Developers",]
+
+    "License :: OSI Approved :: MIT License",keywords = ["mcp", "web-search", "searxng", "content-extraction", "openwebui"]
+
+    "Operating System :: OS Independent",classifiers = [
+
+    "Programming Language :: Python :: 3",    "Development Status :: 4 - Beta",
+
+    "Programming Language :: Python :: 3.9",    "Intended Audience :: Developers",
+
+    "Programming Language :: Python :: 3.10",    "License :: OSI Approved :: MIT License",
+
+    "Programming Language :: Python :: 3.11",    "Operating System :: OS Independent",
+
+    "Programming Language :: Python :: 3.12",    "Programming Language :: Python :: 3",
+
+    "Topic :: Internet :: WWW/HTTP :: Indexing/Search",    "Programming Language :: Python :: 3.8",
+
+    "Topic :: Software Development :: Libraries :: Python Modules",    "Programming Language :: Python :: 3.9",
+
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",    "Programming Language :: Python :: 3.10",
+
+]    "Programming Language :: Python :: 3.11",
+
+keywords = ["mcp", "model-context-protocol", "web-search", "ai", "semantic-search", "ollama", "docker"]    "Programming Language :: Python :: 3.12",
+
+requires-python = ">=3.9"    "Topic :: Internet :: WWW/HTTP :: Indexing/Search",
+
+dependencies = [    "Topic :: Software Development :: Libraries :: Python Modules",
+
+    "fastapi>=0.104.1",]
+
+    "uvicorn[standard]>=0.24.0",requires-python = ">=3.8"
+
+    "httpx>=0.25.2",dependencies = [
+
+    "beautifulsoup4>=4.12.2",    # Core dependencies
+
+    "lxml>=4.9.3",    "asyncio",
+
+    "requests>=2.31.0",    "aiofiles>=23.0.0",
+
+    "python-dateutil>=2.8.2",    
+
+    "scikit-learn>=1.3.2",    # HTTP client
+
+    "numpy>=1.24.4",    "httpx>=0.25.0",
+
+    "aiofiles>=23.2.1",    
+
+    "python-multipart>=0.0.6",    # HTML parsing and content extraction
+
+    "mcp>=1.0.0",    "beautifulsoup4>=4.12.0",
+
+]    "lxml>=4.9.0",
+
+dynamic = ["version"]    "readability-lxml>=0.8.1",
+
+    "newspaper3k>=0.2.8",
+
+[project.urls]    
+
+"Homepage" = "https://github.com/Fouadbtlb/mcp-web-search"    # Cache
+
+"Bug Tracker" = "https://github.com/Fouadbtlb/mcp-web-search/issues"    "redis>=5.0.0",
+
+"Docker Hub" = "https://hub.docker.com/r/boutalebfouad/mcp-web-search"    "aioredis>=2.0.0",
+
+"Repository" = "https://github.com/Fouadbtlb/mcp-web-search"    
+
+    # Semantic search and AI enhancements
+
+[project.scripts]    "sentence-transformers>=2.2.0",
+
+mcp-web-search = "src.server:main"    "transformers>=4.30.0",
+
+mcp-web-search-stdio = "src.mcp_server:main"    "torch>=2.0.0",
+
+    "numpy>=1.24.0",
+
+[project.optional-dependencies]    "scikit-learn>=1.3.0",
+
+dev = [    
+
+    "pytest>=7.0.0",    # Content processing enhancements
+
+    "pytest-asyncio>=0.21.0",    "spacy>=3.6.0",
+
+    "black>=23.0.0",    "textstat>=0.7.0",
+
+    "flake8>=6.0.0",    "markdown>=3.4.0",
+
+    "mypy>=1.0.0",    "python-dateutil>=2.8.0",
+
+]    
+
+    # User agent
+
+[tool.setuptools]    "fake-useragent>=1.4.0",
+
+packages = ["src"]    
+
+    # Data validation
+
+[tool.setuptools.package-data]    "pydantic>=2.0.0",
+
+"*" = ["*.md", "*.txt", "*.yml", "*.yaml"]    
+
+    # Browser automation (optional)
+
+[tool.black]    "playwright>=1.40.0",
+
+line-length = 88]
+
+target-version = ['py39']
+
+[project.optional-dependencies]
+
+[tool.mypy]dev = [
+
+python_version = "3.9"    "pytest>=7.0.0",
+
+warn_return_any = true    "pytest-asyncio>=0.21.0",
+
+warn_unused_configs = true    "pytest-mock>=3.10.0",
+
+disallow_untyped_defs = true    "black>=23.0.0",
+    "isort>=5.12.0",
+    "flake8>=6.0.0",
+    "mypy>=1.0.0",
+    "pre-commit>=3.0.0",
+]
+
+mcp = [
+    "mcp>=1.0.0",
+    "uvicorn>=0.24.0",
+    "fastapi>=0.104.0",
+]
+
+all = [
+    "mcp-web-search[dev,mcp]",
+]
+
+[project.urls]
+Homepage = "https://github.com/yourusername/mcp-web-search"
+Repository = "https://github.com/yourusername/mcp-web-search.git"
+Issues = "https://github.com/yourusername/mcp-web-search/issues"
+Documentation = "https://github.com/yourusername/mcp-web-search#readme"
+
+[project.scripts]
+mcp-web-search = "src.server:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*"]
+
+[tool.setuptools.package-data]
+"*" = ["*.txt", "*.md", "*.yml", "*.yaml"]
+
+# Configuration des outils de développement
+
+[tool.black]
+line-length = 100
+target-version = ['py38', 'py39', 'py310', 'py311', 'py312']
+include = '\.pyi?$'
+extend-exclude = '''
+/(
+  # directories
+  \.eggs
+  | \.git
+  | \.hg
+  | \.mypy_cache
+  | \.tox
+  | \.venv
+  | _build
+  | buck-out
+  | build
+  | dist
+)/
+'''
+
+[tool.isort]
+profile = "black"
+line_length = 100
+multi_line_output = 3
+include_trailing_comma = true
+force_grid_wrap = 0
+use_parentheses = true
+ensure_newline_before_comments = true
+
+[tool.flake8]
+max-line-length = 100
+extend-ignore = ["E203", "W503"]
+exclude = [".git", "__pycache__", "dist", "build", "*.egg-info"]
+
+[tool.mypy]
+python_version = "3.8"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = false
+disallow_incomplete_defs = false
+check_untyped_defs = true
+disallow_untyped_decorators = false
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_no_return = true
+warn_unreachable = true
+strict_equality = true
+show_error_codes = true
+
+[[tool.mypy.overrides]]
+module = [
+    "newspaper.*",
+    "readability.*", 
+    "fake_useragent.*",
+    "playwright.*",
+    "aioredis.*",
+    "mcp.*"
+]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+minversion = "7.0"
+addopts = "-ra -q --tb=short"
+testpaths = [
+    "tests",
+]
+asyncio_mode = "auto"
+python_files = [
+    "test_*.py",
+    "*_test.py",
+]
+python_classes = [
+    "Test*",
+]
+python_functions = [
+    "test_*",
+]
+
+[tool.coverage.run]
+source = ["src"]
+omit = [
+    "*/tests/*",
+    "*/test_*",
+    "*/__pycache__/*",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "if self.debug:",
+    "if settings.DEBUG",
+    "raise AssertionError",
+    "raise NotImplementedError",
+    "if 0:",
+    "if __name__ == .__main__.:",
+    "class .*\\bProtocol\\):",
+    "@(abc\\.)?abstractmethod",
+]
