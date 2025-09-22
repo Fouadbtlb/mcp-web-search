@@ -1,3 +1,9 @@
+# AI Context and Development Notes (should never be committed)
+.ai-context.md
+.dev-notes.md
+.agent-context/
+**/ai-context*
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
