@@ -78,8 +78,9 @@ class SearchRequest(BaseModel):
 class SearchResponse(BaseModel):
     query: str
     results: List[Dict[str, Any]]
-    intent: Dict[str, Any]
-    trace: Dict[str, Any]  # Changed from metadata to trace to match actual response
+    intent: Optional[Dict[str, Any]] = None
+    trace: Optional[Dict[str, Any]] = None  # Changed from metadata to trace to match actual response
+    error: Optional[str] = None
 
 # HTTP API Endpoints
 @app.get("/")
@@ -95,7 +96,7 @@ async def health():
         "service": "MCP Web Search Server",
         "version": "1.2.0-enhanced",
         "timestamp": datetime.utcnow().isoformat(),
-        "cache_enabled": settings.config.cache.enabled
+        "cache_enabled": settings.CACHE_ENABLED
     }
 
 @app.post("/search", response_model=SearchResponse)
@@ -103,7 +104,11 @@ async def search_endpoint(request: SearchRequest):
     """Web search endpoint"""
     global search_service
     if not search_service:
-        raise HTTPException(status_code=503, detail="Search service not initialized")
+        return SearchResponse(
+            query=request.q,
+            results=[],
+            error="Search service not initialized"
+        )
     
     try:
         # Perform search
@@ -118,7 +123,11 @@ async def search_endpoint(request: SearchRequest):
         
     except Exception as e:
         logger.error(f"Search error: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Search failed: {str(e)}")
+        return SearchResponse(
+            query=request.q,
+            results=[],
+            error=f"Search failed: {str(e)}"
+        )
 
 @app.get("/search")
 async def search_get_endpoint(
@@ -182,7 +191,7 @@ class WebSearchMCP:
         try:
             # Extraction des paramètres
             query = args.get("q", "")
-            n_results = args.get("n_results", settings.config.default_max_results)
+            n_results = args.get("n_results", settings.MAX_RESULTS)
             freshness = args.get("freshness", "all")
             sources = args.get("sources", ["searxng"])
             content_types = args.get("content_types", ["article"])
@@ -271,7 +280,7 @@ class WebSearchMCP:
             # Déduplication et filtrage final
             final_results = self.quality_filter.deduplicate_and_filter(
                 enriched_results, 
-                min_score=settings.config.quality.min_quality_score
+                min_score=0.1  # Use a default minimum score
             )
             
             logger.info(f"{len(final_results)} résultats finaux après filtrage")
@@ -297,7 +306,7 @@ class WebSearchMCP:
             
             # Mise en cache
             if self.cache:
-                await self.cache.set(cache_key, response, ttl=settings.config.cache.default_ttl)
+                await self.cache.set(cache_key, response, ttl=settings.CONTENT_CACHE_TTL)
             
             return response
             
@@ -319,7 +328,7 @@ class WebSearchMCP:
             return []
         
         tasks = []
-        max_concurrent = settings.config.content_extraction.max_concurrent_fetches
+        max_concurrent = settings.MAX_CONCURRENT_EXTRACTIONS
         
         for result in results:
             task = self._process_single_result(result, require_full_fetch, content_types, query)
@@ -359,7 +368,7 @@ class WebSearchMCP:
             
             # Récupération du contenu
             use_playwright = (require_full_fetch or 
-                            settings.config.content_extraction.use_playwright or
+                            settings.JAVASCRIPT_ENABLED or
                             self._needs_js_rendering(url))
             
             content_data = await self.fetcher.fetch_content(url, use_headless=use_playwright)
@@ -391,7 +400,7 @@ class WebSearchMCP:
             )
             
             # Formatage du résultat final
-            max_length = settings.config.content_extraction.max_content_length
+            max_length = settings.MAX_CONTENT_LENGTH
             base_result = {
                 "url": url,
                 "title": extracted_content.get("title", result.get("title", "")),
@@ -575,7 +584,7 @@ async def main():
         
         try:
             logger.info("Serveur MCP Web Search démarré")
-            logger.info(f"Configuration: Cache {'activé' if settings.config.cache.enabled else 'désactivé'}")
+            logger.info(f"Configuration: Cache {'activé' if settings.CACHE_ENABLED else 'désactivé'}")
             
             # Interface simple pour test
             if len(sys.argv) > 1 and sys.argv[1] == "test":
