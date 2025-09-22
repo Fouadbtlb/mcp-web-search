@@ -1,0 +1,65 @@
+# Git files
+.git
+.gitignore
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+venv/
+.venv/
+env/
+ENV/
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+logs/
+*.log
+
+# Test files
+test_*
+*_test.py
+tests/
+
+# Documentation
+README.md
+OPENWEBUI_INTEGRATION.md
+
+# Docker files
+docker-compose*.yml
+Dockerfile*
+
+# Model cache (will be downloaded in container)
+models/
+
+# Cache files
+cache/
+*.cache
