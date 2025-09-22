@@ -121,3 +121,5 @@ class ContentFetcher:
         """Clean up resources"""
         # Nothing to clean up for httpx-only implementation
         pass
+
+search_fetcher = ContentFetcher()

@@ -1,0 +1,1989 @@
+import os
+from typing import Optional, List
+from pydantic import BaseSettings, Field
+
+class Settings(BaseSettings):
+    # Server Configuration
+    SERVER_MODE: str = Field(default="stdio", description="Server mode: stdio or http")
+    HOST: str = Field(default="0.0.0.0", description="Server host")
+    PORT: int = Field(default=8001, description="Server port")
+    LOG_LEVEL: str = Field(default="INFO", description="Logging level")
+    
+    # Search Configuration
+    SEARXNG_URL: str = Field(default="https://searx.be", description="SearxNG instance URL")
+    DUCKDUCKGO_FALLBACK: bool = Field(default=True, description="Enable DuckDuckGo fallback")
+    MAX_RESULTS: int = Field(default=20, description="Maximum search results")
+    TIMEOUT_SECONDS: int = Field(default=30, description="Request timeout")
+    
+    # AI Models Configuration - UPDATED
+    OLLAMA_URL: str = Field(default="http://localhost:11434", description="Ollama server URL")
+    EMBEDDING_MODEL: str = Field(default="nomic-ai/stella_en_1.5B_v5", description="Embedding model name")
+    RERANKER_MODEL: str = Field(default="BAAI/bge-reranker-v2-m3", description="Reranker model name")
+    EMBEDDING_DIMENSIONS: int = Field(default=1024, description="Embedding dimensions")
+    RERANKER_MAX_LENGTH: int = Field(default=8192, description="Maximum reranker input length")
+    ENABLE_SEMANTIC_RANKING: bool = Field(default=True, description="Enable AI-powered ranking")
+    ENABLE_RERANKING: bool = Field(default=True, description="Enable reranking stage")
+    
+    # Content Extraction Configuration - NEW
+    ENABLE_STRUCTURED_EXTRACTION: bool = Field(default=True, description="Enable structured data extraction")
+    MARKDOWN_OPTIMIZATION: bool = Field(default=True, description="Enable LLM-optimized markdown")
+    EXTRACT_METADATA: bool = Field(default=True, description="Extract rich metadata")
+    JAVASCRIPT_ENABLED: bool = Field(default=True, description="Enable JavaScript rendering")
+    STEALTH_MODE: bool = Field(default=True, description="Enable anti-detection measures")
+    
+    # Performance Configuration
+    MAX_CONCURRENT_EXTRACTIONS: int = Field(default=5, description="Max concurrent content extractions")
+    CONTENT_CACHE_TTL: int = Field(default=3600, description="Content cache TTL in seconds")
+    
+    # Caching Configuration
+    CACHE_ENABLED: bool = Field(default=False, description="Enable result caching")
+    REDIS_URL: Optional[str] = Field(default=None, description="Redis connection URL")
+    
+    # Content Processing
+    MIN_CONTENT_LENGTH: int = Field(default=100, description="Minimum content length")
+    MAX_CONTENT_LENGTH: int = Field(default=50000, description="Maximum content length")
+    EXCLUDE_TAGS: List[str] = Field(default=["script", "style", "nav", "footer", "aside"], description="HTML tags to exclude")
+    
+    class Config:
+        env_file = ".env"
+        case_sensitive = True
+
+settings = Settings()
+
+import asyncio
+import logging
+from typing import List, Dict, Any, Optional, Tuple
+import httpx
+from transformers import AutoTokenizer, AutoModelForSequenceClassification
+import torch
+from sentence_transformers import CrossEncoder
+import numpy as np
+from ..config.settings import settings
+
+logger = logging.getLogger(__name__)
+
+class DocumentReranker:
+    """Advanced document reranker using BGE-reranker-v2-m3"""
+    
+    def __init__(self):
+        self.model_name = settings.RERANKER_MODEL
+        self.max_length = settings.RERANKER_MAX_LENGTH
+        self.model = None
+        self.tokenizer = None
+        self.cross_encoder = None
+        self._model_loaded = False
+        
+    async def initialize(self) -> bool:
+        """Initialize the reranker model"""
+        try:
+            if settings.OLLAMA_URL:
+                # Try to use Ollama first
+                return await self._initialize_ollama()
+            else:
+                # Fallback to local model
+                return await self._initialize_local_model()
+        except Exception as e:
+            logger.error(f"Failed to initialize reranker: {e}")
+            return False
+    
+    async def _initialize_ollama(self) -> bool:
+        """Initialize via Ollama server"""
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                # Check if model is available
+                response = await client.get(f"{settings.OLLAMA_URL}/api/tags")
+                if response.status_code == 200:
+                    models = response.json().get("models", [])
+                    model_names = [m.get("name", "") for m in models]
+                    
+                    # Check if our reranker model is available
+                    if any("bge-reranker" in name for name in model_names):
+                        self._model_loaded = True
+                        logger.info("Reranker model available via Ollama")
+                        return True
+                        
+            return await self._initialize_local_model()
+        except Exception as e:
+            logger.warning(f"Ollama initialization failed: {e}, falling back to local model")
+            return await self._initialize_local_model()
+    
+    async def _initialize_local_model(self) -> bool:
+        """Initialize local CrossEncoder model"""
+        try:
+            # Use CrossEncoder for easier integration
+            self.cross_encoder = CrossEncoder(
+                self.model_name,
+                max_length=self.max_length,
+                device="cuda" if torch.cuda.is_available() else "cpu"
+            )
+            self._model_loaded = True
+            logger.info(f"Local reranker model loaded: {self.model_name}")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to load local reranker model: {e}")
+            return False
+    
+    async def rerank_documents(
+        self, 
+        query: str, 
+        documents: List[Dict[str, Any]], 
+        top_k: Optional[int] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        Rerank documents based on query relevance
+        
+        Args:
+            query: Search query
+            documents: List of documents with content
+            top_k: Number of top documents to return
+            
+        Returns:
+            Reranked documents with scores
+        """
+        if not self._model_loaded or not documents:
+            return documents
+        
+        try:
+            # Prepare query-document pairs
+            pairs = []
+            valid_docs = []
+            
+            for doc in documents:
+                content = self._prepare_document_text(doc)
+                if content and len(content.strip()) >= settings.MIN_CONTENT_LENGTH:
+                    pairs.append([query, content])
+                    valid_docs.append(doc)
+            
+            if not pairs:
+                return documents
+            
+            # Get reranking scores
+            if self.cross_encoder:
+                scores = await self._rerank_with_cross_encoder(pairs)
+            else:
+                scores = await self._rerank_with_ollama(query, valid_docs)
+            
+            # Combine documents with scores
+            scored_docs = []
+            for doc, score in zip(valid_docs, scores):
+                doc_copy = doc.copy()
+                doc_copy["rerank_score"] = float(score)
+                # Combine with existing semantic score if available
+                if "semantic_score" in doc_copy:
+                    doc_copy["combined_score"] = (
+                        0.6 * float(score) + 0.4 * doc_copy["semantic_score"]
+                    )
+                else:
+                    doc_copy["combined_score"] = float(score)
+                scored_docs.append(doc_copy)
+            
+            # Sort by rerank score (descending)
+            scored_docs.sort(key=lambda x: x["rerank_score"], reverse=True)
+            
+            # Return top_k if specified
+            if top_k:
+                scored_docs = scored_docs[:top_k]
+            
+            logger.info(f"Reranked {len(scored_docs)} documents")
+            return scored_docs
+            
+        except Exception as e:
+            logger.error(f"Reranking failed: {e}")
+            return documents
+    
+    def _prepare_document_text(self, doc: Dict[str, Any]) -> str:
+        """Prepare document text for reranking"""
+        # Priority order for content
+        content_fields = ["content", "markdown", "snippet", "title"]
+        
+        content_parts = []
+        
+        # Add title if available
+        if "title" in doc and doc["title"]:
+            content_parts.append(f"Title: {doc['title']}")
+        
+        # Add main content
+        for field in content_fields:
+            if field in doc and doc[field]:
+                content = str(doc[field]).strip()
+                if content and len(content) > 50:  # Avoid very short content
+                    content_parts.append(content)
+                    break
+        
+        # Add metadata if available
+        if "metadata" in doc:
+            metadata = doc["metadata"]
+            if isinstance(metadata, dict):
+                if "description" in metadata and metadata["description"]:
+                    content_parts.append(f"Description: {metadata['description']}")
+        
+        full_content = " ".join(content_parts)
+        
+        # Truncate if too long
+        if len(full_content) > self.max_length * 4:  # Rough character limit
+            full_content = full_content[:self.max_length * 4]
+        
+        return full_content
+    
+    async def _rerank_with_cross_encoder(self, pairs: List[List[str]]) -> List[float]:
+        """Rerank using CrossEncoder model"""
+        try:
+            # Run in thread to avoid blocking
+            loop = asyncio.get_event_loop()
+            scores = await loop.run_in_executor(
+                None, 
+                self.cross_encoder.predict, 
+                pairs
+            )
+            return scores.tolist() if isinstance(scores, np.ndarray) else scores
+        except Exception as e:
+            logger.error(f"CrossEncoder prediction failed: {e}")
+            return [0.5] * len(pairs)
+    
+    async def _rerank_with_ollama(self, query: str, documents: List[Dict]) -> List[float]:
+        """Rerank using Ollama API"""
+        try:
+            scores = []
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                for doc in documents:
+                    content = self._prepare_document_text(doc)
+                    
+                    # Create prompt for reranking
+                    prompt = f"""Rate the relevance of this document to the query on a scale of 0.0 to 1.0.
+
+Query: {query}
+
+Document: {content[:2000]}...
+
+Relevance score (0.0-1.0):"""
+
+                    response = await client.post(
+                        f"{settings.OLLAMA_URL}/api/generate",
+                        json={
+                            "model": "bge-reranker-v2-m3",
+                            "prompt": prompt,
+                            "stream": False,
+                            "options": {
+                                "temperature": 0.1,
+                                "top_p": 0.9
+                            }
+                        }
+                    )
+                    
+                    if response.status_code == 200:
+                        result = response.json()
+                        score_text = result.get("response", "0.5").strip()
+                        try:
+                            score = float(score_text)
+                            scores.append(max(0.0, min(1.0, score)))
+                        except ValueError:
+                            scores.append(0.5)
+                    else:
+                        scores.append(0.5)
+            
+            return scores
+        except Exception as e:
+            logger.error(f"Ollama reranking failed: {e}")
+            return [0.5] * len(documents)
+
+# Global reranker instance
+reranker = DocumentReranker()
+
+import asyncio
+import logging
+import re
+from typing import Dict, List, Optional, Any, Set
+from datetime import datetime
+import httpx
+from bs4 import BeautifulSoup, Tag
+import html2text
+from urllib.parse import urljoin, urlparse
+import json
+from readability import Document
+from langdetect import detect, DetectorFactory
+from ..config.settings import settings
+
+# Set langdetect to be deterministic
+DetectorFactory.seed = 0
+
+logger = logging.getLogger(__name__)
+
+class AdvancedContentExtractor:
+    """Advanced content extractor inspired by Firecrawl architecture"""
+    
+    def __init__(self):
+        self.html2text = html2text.HTML2Text()
+        self.html2text.ignore_links = False
+        self.html2text.ignore_images = False
+        self.html2text.body_width = 0
+        self.html2text.unicode_snob = True
+        
+        # Configure for LLM-optimized markdown
+        if settings.MARKDOWN_OPTIMIZATION:
+            self.html2text.ignore_emphasis = False
+            self.html2text.mark_code = True
+            self.html2text.wrap_links = False
+            self.html2text.inline_links = True
+    
+    async def extract_content(self, url: str, html: str = None) -> Dict[str, Any]:
+        """
+        Extract comprehensive content from URL
+        
+        Args:
+            url: Target URL
+            html: Optional pre-fetched HTML content
+            
+        Returns:
+            Dictionary with extracted content and metadata
+        """
+        try:
+            if not html:
+                html = await self._fetch_html(url)
+            
+            if not html:
+                return {"error": "Failed to fetch content", "url": url}
+            
+            # Parse HTML
+            soup = BeautifulSoup(html, 'lxml')
+            
+            # Extract using multiple methods
+            extraction_result = {
+                "url": url,
+                "html": html if len(html) < 100000 else html[:100000] + "...",  # Truncate large HTML
+                "timestamp": datetime.utcnow().isoformat()
+            }
+            
+            # Basic metadata extraction
+            extraction_result.update(await self._extract_metadata(soup, url))
+            
+            # Content extraction with multiple methods
+            content_methods = {
+                "readability": await self._extract_with_readability(html),
+                "manual": await self._extract_manual(soup),
+                "structured": await self._extract_structured_data(soup)
+            }
+            
+            # Choose best content
+            best_content = self._choose_best_content(content_methods)
+            extraction_result.update(best_content)
+            
+            # Convert to optimized markdown
+            if settings.MARKDOWN_OPTIMIZATION and extraction_result.get("content"):
+                extraction_result["markdown"] = await self._optimize_markdown(
+                    extraction_result["content"],
+                    extraction_result.get("title", ""),
+                    soup
+                )
+            
+            # Language detection
+            if extraction_result.get("content"):
+                try:
+                    extraction_result["language"] = detect(extraction_result["content"][:1000])
+                except:
+                    extraction_result["language"] = "unknown"
+            
+            # Content quality metrics
+            extraction_result["quality_metrics"] = self._calculate_quality_metrics(extraction_result)
+            
+            # Extract links and references
+            if settings.EXTRACT_METADATA:
+                extraction_result["links"] = self._extract_links(soup, url)
+                extraction_result["images"] = self._extract_images(soup, url)
+            
+            return extraction_result
+            
+        except Exception as e:
+            logger.error(f"Content extraction failed for {url}: {e}")
+            return {"error": str(e), "url": url}
+    
+    async def _fetch_html(self, url: str) -> Optional[str]:
+        """Fetch HTML with anti-detection measures"""
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.5",
+            "Accept-Encoding": "gzip, deflate, br",
+            "Connection": "keep-alive",
+            "Upgrade-Insecure-Requests": "1",
+        }
+        
+        try:
+            async with httpx.AsyncClient(
+                timeout=settings.TIMEOUT_SECONDS,
+                headers=headers,
+                follow_redirects=True
+            ) as client:
+                response = await client.get(url)
+                response.raise_for_status()
+                return response.text
+        except Exception as e:
+            logger.error(f"Failed to fetch {url}: {e}")
+            return None
+    
+    async def _extract_metadata(self, soup: BeautifulSoup, url: str) -> Dict[str, Any]:
+        """Extract comprehensive metadata"""
+        metadata = {}
+        
+        # Basic metadata
+        title_tag = soup.find('title')
+        metadata["title"] = title_tag.get_text().strip() if title_tag else ""
+        
+        # Meta tags
+        meta_tags = soup.find_all('meta')
+        for tag in meta_tags:
+            name = tag.get('name') or tag.get('property') or tag.get('itemprop')
+            content = tag.get('content')
+            
+            if name and content:
+                name = name.lower().replace(':', '_').replace('-', '_')
+                metadata[name] = content
+        
+        # Structured data (JSON-LD)
+        json_ld_scripts = soup.find_all('script', type='application/ld+json')
+        structured_data = []
+        for script in json_ld_scripts:
+            try:
+                data = json.loads(script.string)
+                structured_data.append(data)
+            except:
+                continue
+        
+        if structured_data:
+            metadata["structured_data"] = structured_data
+        
+        # Author extraction
+        author = self._extract_author(soup)
+        if author:
+            metadata["author"] = author
+        
+        # Publication date
+        pub_date = self._extract_publication_date(soup)
+        if pub_date:
+            metadata["publish_date"] = pub_date
+        
+        # Keywords extraction
+        keywords = self._extract_keywords(soup)
+        if keywords:
+            metadata["keywords"] = keywords
+        
+        return {"metadata": metadata}
+    
+    async def _extract_with_readability(self, html: str) -> Dict[str, str]:
+        """Extract content using readability algorithm"""
+        try:
+            doc = Document(html)
+            title = doc.title()
+            content = doc.summary()
+            
+            # Convert to text
+            soup = BeautifulSoup(content, 'html.parser')
+            text_content = soup.get_text()
+            
+            return {
+                "title": title,
+                "content": text_content,
+                "html_content": content,
+                "method": "readability"
+            }
+        except Exception as e:
+            logger.error(f"Readability extraction failed: {e}")
+            return {}
+    
+    async def _extract_manual(self, soup: BeautifulSoup) -> Dict[str, str]:
+        """Manual content extraction with smart selection"""
+        
+        # Remove unwanted elements
+        for tag in soup.find_all(settings.EXCLUDE_TAGS):
+            tag.decompose()
+        
+        # Try to find main content areas
+        content_selectors = [
+            'main', 'article', '.main-content', '.content', 
+            '.post-content', '.entry-content', '.article-content',
+            '#main', '#content', '[role="main"]'
+        ]
+        
+        main_content = None
+        for selector in content_selectors:
+            try:
+                element = soup.select_one(selector)
+                if element:
+                    main_content = element
+                    break
+            except:
+                continue
+        
+        # Fallback to body if no main content found
+        if not main_content:
+            main_content = soup.find('body') or soup
+        
+        # Extract text
+        text_content = main_content.get_text(separator=' ', strip=True)
+        
+        # Clean up whitespace
+        text_content = re.sub(r'\s+', ' ', text_content).strip()
+        
+        return {
+            "content": text_content,
+            "method": "manual"
+        }
+    
+    async def _extract_structured_data(self, soup: BeautifulSoup) -> Dict[str, Any]:
+        """Extract structured data elements"""
+        structured = {}
+        
+        # Headers hierarchy
+        headers = []
+        for i in range(1, 7):
+            h_tags = soup.find_all(f'h{i}')
+            for h in h_tags:
+                headers.append({
+                    "level": i,
+                    "text": h.get_text().strip(),
+                    "id": h.get('id')
+                })
+        
+        if headers:
+            structured["headers"] = headers
+        
+        # Lists
+        lists = []
+        for ul in soup.find_all(['ul', 'ol']):
+            items = [li.get_text().strip() for li in ul.find_all('li')]
+            if items:
+                lists.append({
+                    "type": ul.name,
+                    "items": items
+                })
+        
+        if lists:
+            structured["lists"] = lists
+        
+        # Tables
+        tables = []
+        for table in soup.find_all('table'):
+            rows = []
+            for tr in table.find_all('tr'):
+                cells = [td.get_text().strip() for td in tr.find_all(['td', 'th'])]
+                if cells:
+                    rows.append(cells)
+            if rows:
+                tables.append({"rows": rows})
+        
+        if tables:
+            structured["tables"] = tables
+        
+        return {"structured_elements": structured} if structured else {}
+    
+    def _choose_best_content(self, methods: Dict[str, Dict]) -> Dict[str, Any]:
+        """Choose the best content extraction method"""
+        
+        # Score each method
+        scores = {}
+        for method_name, result in methods.items():
+            if not result or "content" not in result:
+                scores[method_name] = 0
+                continue
+            
+            content = result["content"]
+            score = 0
+            
+            # Length score (prefer reasonable length)
+            length = len(content)
+            if 100 <= length <= 10000:
+                score += 40
+            elif length > 10000:
+                score += 30
+            elif length > 50:
+                score += 20
+            
+            # Structure score (prefer content with paragraphs)
+            if '\n' in content or '. ' in content:
+                score += 30
+            
+            # Quality indicators
+            if any(word in content.lower() for word in ['article', 'content', 'text', 'information']):
+                score += 10
+            
+            # Avoid navigation/menu content
+            if any(word in content.lower() for word in ['menu', 'navigation', 'copyright', 'cookie']):
+                score -= 20
+            
+            scores[method_name] = score
+        
+        # Choose best method
+        best_method = max(scores, key=scores.get) if scores else "manual"
+        best_result = methods.get(best_method, {})
+        
+        return {
+            "content": best_result.get("content", ""),
+            "extraction_method": best_method,
+            **{k: v for k, v in best_result.items() if k != "content"}
+        }
+    
+    async def _optimize_markdown(self, content: str, title: str, soup: BeautifulSoup) -> str:
+        """Convert content to LLM-optimized markdown"""
+        try:
+            # Create a clean HTML structure
+            clean_html = f"""
+            <html>
+            <body>
+            <h1>{title}</h1>
+            <div class="content">
+            {self._clean_html_for_markdown(soup)}
+            </div>
+            </body>
+            </html>
+            """
+            
+            # Convert to markdown
+            markdown = self.html2text.handle(clean_html)
+            
+            # Clean up markdown
+            markdown = self._clean_markdown(markdown)
+            
+            return markdown
+        except Exception as e:
+            logger.error(f"Markdown optimization failed: {e}")
+            return content
+    
+    def _clean_html_for_markdown(self, soup: BeautifulSoup) -> str:
+        """Clean HTML for better markdown conversion"""
+        
+        # Remove unwanted elements
+        for tag in soup.find_all(settings.EXCLUDE_TAGS + ['iframe', 'embed', 'object']):
+            tag.decompose()
+        
+        # Find main content
+        content_selectors = ['main', 'article', '.content', '[role="main"]']
+        main_content = None
+        
+        for selector in content_selectors:
+            try:
+                element = soup.select_one(selector)
+                if element:
+                    main_content = element
+                    break
+            except:
+                continue
+        
+        if not main_content:
+            main_content = soup.find('body') or soup
+        
+        return str(main_content)
+    
+    def _clean_markdown(self, markdown: str) -> str:
+        """Clean up generated markdown"""
+        
+        # Remove excessive whitespace
+        markdown = re.sub(r'\n{3,}', '\n\n', markdown)
+        markdown = re.sub(r'[ \t]+', ' ', markdown)
+        
+        # Fix common markdown issues
+        markdown = re.sub(r'\*\s+\*', '', markdown)  # Remove empty emphasis
+        markdown = re.sub(r'_{2,}', '_', markdown)   # Fix multiple underscores
+        
+        # Clean up links
+        markdown = re.sub(r'\[\s*\]\([^)]*\)', '', markdown)  # Remove empty links
+        
+        return markdown.strip()
+    
+    def _extract_author(self, soup: BeautifulSoup) -> Optional[str]:
+        """Extract author information"""
+        
+        # Try various author selectors
+        author_selectors = [
+            'meta[name="author"]',
+            'meta[property="article:author"]',
+            '.author', '.byline', '.author-name',
+            '[rel="author"]', '[class*="author"]'
+        ]
+        
+        for selector in author_selectors:
+            try:
+                element = soup.select_one(selector)
+                if element:
+                    if element.name == 'meta':
+                        return element.get('content', '').strip()
+                    else:
+                        return element.get_text().strip()
+            except:
+                continue
+        
+        return None
+    
+    def _extract_publication_date(self, soup: BeautifulSoup) -> Optional[str]:
+        """Extract publication date"""
+        
+        # Try various date selectors
+        date_selectors = [
+            'meta[property="article:published_time"]',
+            'meta[name="date"]',
+            'meta[name="pubdate"]',
+            'time[datetime]', '.date', '.publish-date'
+        ]
+        
+        for selector in date_selectors:
+            try:
+                element = soup.select_one(selector)
+                if element:
+                    if element.name == 'meta':
+                        return element.get('content', '').strip()
+                    elif element.name == 'time':
+                        return element.get('datetime') or element.get_text().strip()
+                    else:
+                        return element.get_text().strip()
+            except:
+                continue
+        
+        return None
+    
+    def _extract_keywords(self, soup: BeautifulSoup) -> List[str]:
+        """Extract keywords and tags"""
+        
+        keywords = set()
+        
+        # From meta tags
+        meta_keywords = soup.find('meta', attrs={'name': 'keywords'})
+        if meta_keywords:
+            content = meta_keywords.get('content', '')
+            keywords.update([k.strip() for k in content.split(',') if k.strip()])
+        
+        # From tag elements
+        for tag_selector in ['.tags a', '.tag', '.keywords a', '[class*="tag"]']:
+            try:
+                elements = soup.select(tag_selector)
+                for elem in elements:
+                    text = elem.get_text().strip()
+                    if text and len(text) < 50:  # Avoid long text as keywords
+                        keywords.add(text)
+            except:
+                continue
+        
+        return list(keywords)[:20]  # Limit to 20 keywords
+    
+    def _extract_links(self, soup: BeautifulSoup, base_url: str) -> List[Dict[str, str]]:
+        """Extract internal and external links"""
+        
+        links = []
+        seen_urls = set()
+        
+        for a_tag in soup.find_all('a', href=True):
+            href = a_tag['href'].strip()
+            if not href or href.startswith('#') or href.startswith('mailto:'):
+                continue
+            
+            # Make absolute URL
+            absolute_url = urljoin(base_url, href)
+            
+            # Avoid duplicates
+            if absolute_url in seen_urls:
+                continue
+            seen_urls.add(absolute_url)
+            
+            # Get link text
+            text = a_tag.get_text().strip()
+            if not text:
+                text = a_tag.get('title', '')
+            
+            # Determine if internal or external
+            base_domain = urlparse(base_url).netloc
+            link_domain = urlparse(absolute_url).netloc
+            is_internal = base_domain == link_domain
+            
+            links.append({
+                "url": absolute_url,
+                "text": text,
+                "type": "internal" if is_internal else "external"
+            })
+        
+        return links[:50]  # Limit to 50 links
+    
+    def _extract_images(self, soup: BeautifulSoup, base_url: str) -> List[Dict[str, str]]:
+        """Extract image information"""
+        
+        images = []
+        
+        for img_tag in soup.find_all('img', src=True):
+            src = img_tag['src'].strip()
+            if not src:
+                continue
+            
+            # Make absolute URL
+            absolute_url = urljoin(base_url, src)
+            
+            images.append({
+                "url": absolute_url,
+                "alt": img_tag.get('alt', ''),
+                "title": img_tag.get('title', '')
+            })
+        
+        return images[:20]  # Limit to 20 images
+    
+    def _calculate_quality_metrics(self, extraction_result: Dict[str, Any]) -> Dict[str, Any]:
+        """Calculate content quality metrics"""
+        
+        content = extraction_result.get("content", "")
+        
+        metrics = {
+            "content_length": len(content),
+            "word_count": len(content.split()) if content else 0,
+            "has_title": bool(extraction_result.get("title")),
+            "has_metadata": bool(extraction_result.get("metadata")),
+            "extraction_method": extraction_result.get("extraction_method", "unknown")
+        }
+        
+        # Reading time estimation (average 200 words per minute)
+        if metrics["word_count"] > 0:
+            metrics["reading_time_minutes"] = max(1, metrics["word_count"] // 200)
+        
+        # Content quality score (0-1)
+        score = 0
+        if metrics["content_length"] >= settings.MIN_CONTENT_LENGTH:
+            score += 0.3
+        if metrics["has_title"]:
+            score += 0.2
+        if metrics["has_metadata"]:
+            score += 0.2
+        if metrics["word_count"] >= 50:
+            score += 0.3
+        
+        metrics["quality_score"] = min(1.0, score)
+        
+        return metrics
+
+# Global extractor instance
+content_extractor = AdvancedContentExtractor()
+
+
+
+import asyncio
+import logging
+from typing import List, Dict, Any, Optional
+import httpx
+import numpy as np
+from sentence_transformers import SentenceTransformer
+import torch
+from sklearn.metrics.pairwise import cosine_similarity
+from ..config.settings import settings
+
+logger = logging.getLogger(__name__)
+
+class AdvancedEmbeddingService:
+    """Advanced embedding service using Stella model"""
+    
+    def __init__(self):
+        self.model_name = settings.EMBEDDING_MODEL
+        self.dimensions = settings.EMBEDDING_DIMENSIONS
+        self.model = None
+        self.ollama_available = False
+        self._model_loaded = False
+        
+    async def initialize(self) -> bool:
+        """Initialize the embedding service"""
+        try:
+            # Try Ollama first
+            if settings.OLLAMA_URL:
+                self.ollama_available = await self._check_ollama_availability()
+                
+            # Load local model as fallback
+            if not self.ollama_available:
+                await self._load_local_model()
+                
+            return True
+        except Exception as e:
+            logger.error(f"Failed to initialize embedding service: {e}")
+            return False
+    
+    async def _check_ollama_availability(self) -> bool:
+        """Check if Ollama server is available with our model"""
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                # Check server
+                response = await client.get(f"{settings.OLLAMA_URL}/api/tags")
+                if response.status_code != 200:
+                    return False
+                
+                # Check if our model is available
+                models = response.json().get("models", [])
+                model_names = [m.get("name", "") for m in models]
+                
+                # Look for stella or compatible models
+                compatible_models = [
+                    "stella_en_1.5B_v5", 
+                    "nomic-ai/stella_en_1.5B_v5",
+                    "stella",
+                    "bge-m3",
+                    "nomic-embed-text"
+                ]
+                
+                for model in compatible_models:
+                    if any(model in name for name in model_names):
+                        self.model_name = model
+                        logger.info(f"Found compatible model in Ollama: {model}")
+                        return True
+                
+                logger.warning("No compatible embedding model found in Ollama")
+                return False
+                
+        except Exception as e:
+            logger.warning(f"Ollama availability check failed: {e}")
+            return False
+    
+    async def _load_local_model(self) -> bool:
+        """Load local SentenceTransformer model"""
+        try:
+            # Model mapping for local loading
+            model_mapping = {
+                "nomic-ai/stella_en_1.5B_v5": "dunzhang/stella_en_1.5B_v5",
+                "stella_en_1.5B_v5": "dunzhang/stella_en_1.5B_v5",
+                "bge-m3": "BAAI/bge-m3",
+                "all-minilm": "sentence-transformers/all-MiniLM-L6-v2"
+            }
+            
+            local_model_name = model_mapping.get(
+                self.model_name, 
+                "dunzhang/stella_en_1.5B_v5"  # Default to Stella
+            )
+            
+            # Load in a thread to avoid blocking
+            loop = asyncio.get_event_loop()
+            self.model = await loop.run_in_executor(
+                None,
+                lambda: SentenceTransformer(
+                    local_model_name,
+                    device="cuda" if torch.cuda.is_available() else "cpu"
+                )
+            )
+            
+            self._model_loaded = True
+            logger.info(f"Local embedding model loaded: {local_model_name}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Failed to load local embedding model: {e}")
+            # Final fallback to a simple model
+            try:
+                self.model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
+                self._model_loaded = True
+                logger.warning("Using fallback embedding model: all-MiniLM-L6-v2")
+                return True
+            except Exception as fallback_error:
+                logger.error(f"Fallback model loading failed: {fallback_error}")
+                return False
+    
+    async def generate_embeddings(
+        self, 
+        texts: List[str], 
+        normalize: bool = True
+    ) -> Optional[np.ndarray]:
+        """
+        Generate embeddings for a list of texts
+        
+        Args:
+            texts: List of text strings
+            normalize: Whether to normalize embeddings
+            
+        Returns:
+            Numpy array of embeddings or None if failed
+        """
+        if not texts:
+            return None
+            
+        try:
+            if self.ollama_available:
+                return await self._generate_ollama_embeddings(texts, normalize)
+            elif self._model_loaded:
+                return await self._generate_local_embeddings(texts, normalize)
+            else:
+                logger.error("No embedding service available")
+                return None
+                
+        except Exception as e:
+            logger.error(f"Embedding generation failed: {e}")
+            return None
+    
+    async def _generate_ollama_embeddings(
+        self, 
+        texts: List[str], 
+        normalize: bool
+    ) -> Optional[np.ndarray]:
+        """Generate embeddings using Ollama API"""
+        embeddings = []
+        
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                for text in texts:
+                    response = await client.post(
+                        f"{settings.OLLAMA_URL}/api/embeddings",
+                        json={
+                            "model": self.model_name,
+                            "prompt": text
+                        }
+                    )
+                    
+                    if response.status_code == 200:
+                        result = response.json()
+                        embedding = result.get("embedding", [])
+                        if embedding:
+                            embeddings.append(embedding)
+                        else:
+                            logger.warning(f"Empty embedding received for text: {text[:50]}...")
+                            return None
+                    else:
+                        logger.error(f"Ollama embedding failed with status {response.status_code}")
+                        return None
+            
+            if embeddings:
+                embeddings_array = np.array(embeddings)
+                if normalize:
+                    # L2 normalization
+                    norms = np.linalg.norm(embeddings_array, axis=1, keepdims=True)
+                    norms[norms == 0] = 1  # Avoid division by zero
+                    embeddings_array = embeddings_array / norms
+                
+                return embeddings_array
+            else:
+                return None
+                
+        except Exception as e:
+            logger.error(f"Ollama embedding generation failed: {e}")
+            return None
+    
+    async def _generate_local_embeddings(
+        self, 
+        texts: List[str], 
+        normalize: bool
+    ) -> Optional[np.ndarray]:
+        """Generate embeddings using local model"""
+        try:
+            # Run in executor to avoid blocking
+            loop = asyncio.get_event_loop()
+            embeddings = await loop.run_in_executor(
+                None,
+                lambda: self.model.encode(
+                    texts,
+                    normalize_embeddings=normalize,
+                    show_progress_bar=False
+                )
+            )
+            
+            return embeddings
+            
+        except Exception as e:
+            logger.error(f"Local embedding generation failed: {e}")
+            return None
+    
+    async def calculate_semantic_similarity(
+        self, 
+        query: str, 
+        documents: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        """
+        Calculate semantic similarity between query and documents
+        
+        Args:
+            query: Search query
+            documents: List of documents with content
+            
+        Returns:
+            Documents with semantic scores
+        """
+        if not documents:
+            return documents
+        
+        try:
+            # Prepare texts for embedding
+            texts = [query]  # Query first
+            document_texts = []
+            
+            for doc in documents:
+                # Extract text content for embedding
+                text = self._extract_document_text(doc)
+                if text:
+                    texts.append(text)
+                    document_texts.append(text)
+                else:
+                    # Add placeholder for documents without extractable text
+                    texts.append("")
+                    document_texts.append("")
+            
+            # Generate embeddings
+            embeddings = await self.generate_embeddings(texts)
+            
+            if embeddings is None or len(embeddings) < 2:
+                logger.warning("Failed to generate embeddings for semantic similarity")
+                return documents
+            
+            # Calculate similarities
+            query_embedding = embeddings[0:1]  # First embedding is query
+            doc_embeddings = embeddings[1:]    # Rest are documents
+            
+            # Cosine similarity
+            similarities = cosine_similarity(query_embedding, doc_embeddings)[0]
+            
+            # Add scores to documents
+            scored_documents = []
+            for i, doc in enumerate(documents):
+                doc_copy = doc.copy()
+                if i < len(similarities):
+                    doc_copy["semantic_score"] = float(similarities[i])
+                else:
+                    doc_copy["semantic_score"] = 0.0
+                scored_documents.append(doc_copy)
+            
+            # Sort by semantic score (descending)
+            scored_documents.sort(key=lambda x: x["semantic_score"], reverse=True)
+            
+            logger.info(f"Calculated semantic similarity for {len(scored_documents)} documents")
+            return scored_documents
+            
+        except Exception as e:
+            logger.error(f"Semantic similarity calculation failed: {e}")
+            return documents
+    
+    def _extract_document_text(self, doc: Dict[str, Any]) -> str:
+        """Extract text from document for embedding"""
+        
+        # Priority order for text extraction
+        text_fields = ["content", "markdown", "snippet", "title"]
+        
+        text_parts = []
+        
+        # Add title with weight
+        title = doc.get("title", "")
+        if title:
+            text_parts.append(f"{title} {title}")  # Duplicate for emphasis
+        
+        # Add main content
+        for field in text_fields:
+            if field in doc and doc[field]:
+                content = str(doc[field]).strip()
+                if content:
+                    # Truncate very long content for embedding efficiency
+                    if len(content) > 2000:
+                        content = content[:2000] + "..."
+                    text_parts.append(content)
+                    break
+        
+        # Add metadata if available
+        metadata = doc.get("metadata", {})
+        if isinstance(metadata, dict):
+            description = metadata.get("description", "")
+            if description:
+                text_parts.append(description)
+        
+        return " ".join(text_parts)
+    
+    async def embed_query(self, query: str) -> Optional[np.ndarray]:
+        """Generate embedding for a single query"""
+        embeddings = await self.generate_embeddings([query])
+        return embeddings[0] if embeddings is not None else None
+    
+    def get_model_info(self) -> Dict[str, Any]:
+        """Get information about the current embedding model"""
+        return {
+            "model_name": self.model_name,
+            "dimensions": self.dimensions,
+            "ollama_available": self.ollama_available,
+            "local_model_loaded": self._model_loaded,
+            "device": "cuda" if torch.cuda.is_available() else "cpu"
+        }
+
+# Global embedding service instance
+embedding_service = AdvancedEmbeddingService()
+
+
+import asyncio
+import logging
+from typing import List, Dict, Any, Optional
+from datetime import datetime
+import time
+from ..config.settings import settings
+from .fetcher import search_fetcher
+from .extractor import content_extractor
+from .embeddings import embedding_service
+from .reranker import reranker
+from .cache import search_cache
+
+logger = logging.getLogger(__name__)
+
+class AdvancedSearchAggregator:
+    """Advanced search aggregator with multi-stage AI processing"""
+    
+    def __init__(self):
+        self.initialized = False
+        
+    async def initialize(self):
+        """Initialize all components"""
+        if self.initialized:
+            return
+            
+        try:
+            # Initialize AI components
+            await embedding_service.initialize()
+            await reranker.initialize()
+            
+            self.initialized = True
+            logger.info("Search aggregator initialized successfully")
+        except Exception as e:
+            logger.error(f"Failed to initialize search aggregator: {e}")
+            raise
+    
+    async def search(
+        self,
+        query: str,
+        n_results: int = 5,
+        fresh_only: bool = False,
+        require_full_fetch: bool = True,
+        enable_reranking: bool = None,
+        **kwargs
+    ) -> Dict[str, Any]:
+        """
+        Perform comprehensive search with multi-stage AI enhancement
+        
+        Args:
+            query: Search query
+            n_results: Number of results to return
+            fresh_only: Whether to prefer recent content
+            require_full_fetch: Whether to extract full content
+            enable_reranking: Whether to enable reranking (default from settings)
+            
+        Returns:
+            Search results with comprehensive data
+        """
+        start_time = time.time()
+        
+        try:
+            # Ensure initialization
+            if not self.initialized:
+                await self.initialize()
+            
+            # Check cache first
+            cache_key = self._generate_cache_key(query, n_results, fresh_only, require_full_fetch)
+            if settings.CACHE_ENABLED:
+                cached_result = await search_cache.get(cache_key)
+                if cached_result:
+                    logger.info(f"Cache hit for query: {query}")
+                    return cached_result
+            
+            # Step 1: Fetch raw search results
+            logger.info(f"Starting search for: {query}")
+            raw_results = await search_fetcher.search(
+                query=query,
+                max_results=min(n_results * 3, 50),  # Fetch more for better filtering
+                fresh_only=fresh_only
+            )
+            
+            if not raw_results:
+                return {
+                    "query": query,
+                    "results": [],
+                    "total_found": 0,
+                    "search_time": time.time() - start_time,
+                    "message": "No results found"
+                }
+            
+            # Step 2: Content extraction (parallel processing)
+            if require_full_fetch:
+                enhanced_results = await self._extract_content_parallel(raw_results)
+            else:
+                enhanced_results = raw_results
+            
+            # Step 3: AI-powered semantic ranking
+            if settings.ENABLE_SEMANTIC_RANKING and enhanced_results:
+                enhanced_results = await embedding_service.calculate_semantic_similarity(
+                    query, enhanced_results
+                )
+            
+            # Step 4: Reranking stage
+            enable_rerank = enable_reranking if enable_reranking is not None else settings.ENABLE_RERANKING
+            if enable_rerank and enhanced_results:
+                enhanced_results = await reranker.rerank_documents(
+                    query, enhanced_results, top_k=n_results * 2
+                )
+            
+            # Step 5: Final filtering and ranking
+            final_results = await self._finalize_results(
+                enhanced_results, 
+                n_results, 
+                fresh_only
+            )
+            
+            # Prepare response
+            search_time = time.time() - start_time
+            response = {
+                "query": query,
+                "results": final_results,
+                "total_found": len(raw_results),
+                "returned": len(final_results),
+                "search_time": round(search_time, 2),
+                "ai_enhanced": settings.ENABLE_SEMANTIC_RANKING or enable_rerank,
+                "timestamp": datetime.utcnow().isoformat(),
+                "processing_info": {
+                    "content_extraction": require_full_fetch,
+                    "semantic_ranking": settings.ENABLE_SEMANTIC_RANKING,
+                    "reranking": enable_rerank,
+                    "embedding_model": embedding_service.model_name,
+                    "reranker_model": reranker.model_name if enable_rerank else None
+                }
+            }
+            
+            # Cache the result
+            if settings.CACHE_ENABLED:
+                await search_cache.set(cache_key, response, ttl=settings.CONTENT_CACHE_TTL)
+            
+            logger.info(f"Search completed in {search_time:.2f}s, returned {len(final_results)} results")
+            return response
+            
+        except Exception as e:
+            logger.error(f"Search failed for query '{query}': {e}")
+            return {
+                "query": query,
+                "results": [],
+                "total_found": 0,
+                "search_time": time.time() - start_time,
+                "error": str(e)
+            }
+    
+    async def _extract_content_parallel(self, results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Extract content from results in parallel"""
+        
+        # Limit concurrent extractions
+        semaphore = asyncio.Semaphore(settings.MAX_CONCURRENT_EXTRACTIONS)
+        
+        async def extract_single(result: Dict[str, Any]) -> Dict[str, Any]:
+            async with semaphore:
+                try:
+                    url = result.get("url", "")
+                    if not url:
+                        return result
+                    
+                    # Extract content
+                    extracted = await content_extractor.extract_content(url)
+                    
+                    # Merge with original result
+                    enhanced_result = result.copy()
+                    enhanced_result.update(extracted)
+                    
+                    return enhanced_result
+                    
+                except Exception as e:
+                    logger.warning(f"Content extraction failed for {result.get('url', 'unknown')}: {e}")
+                    return result
+        
+        # Process all results in parallel
+        try:
+            enhanced_results = await asyncio.gather(
+                *[extract_single(result) for result in results],
+                return_exceptions=True
+            )
+            
+            # Filter out exceptions and failed extractions
+            valid_results = []
+            for i, result in enumerate(enhanced_results):
+                if isinstance(result, Exception):
+                    logger.warning(f"Content extraction exception for result {i}: {result}")
+                    valid_results.append(results[i])  # Use original result
+                elif isinstance(result, dict):
+                    valid_results.append(result)
+                else:
+                    valid_results.append(results[i])  # Fallback to original
+            
+            logger.info(f"Content extraction completed for {len(valid_results)} results")
+            return valid_results
+            
+        except Exception as e:
+            logger.error(f"Parallel content extraction failed: {e}")
+            return results  # Return original results on failure
+    
+    async def _finalize_results(
+        self, 
+        results: List[Dict[str, Any]], 
+        n_results: int, 
+        fresh_only: bool
+    ) -> List[Dict[str, Any]]:
+        """Apply final filtering and ranking to results"""
+        
+        if not results:
+            return []
+        
+        # Filter by quality
+        quality_filtered = []
+        for result in results:
+            quality_metrics = result.get("quality_metrics", {})
+            quality_score = quality_metrics.get("quality_score", 0.0)
+            
+            # Basic quality threshold
+            if quality_score >= 0.3 or not quality_metrics:  # Keep if no metrics available
+                quality_filtered.append(result)
+        
+        # Apply freshness filtering if requested
+        if fresh_only:
+            # This would need implementation based on publication dates
+            # For now, we'll skip this filter
+            pass
+        
+        # Remove duplicates based on URL and content similarity
+        deduplicated = self._remove_duplicates(quality_filtered)
+        
+        # Final ranking - combine all scores
+        for result in deduplicated:
+            final_score = 0.0
+            score_count = 0
+            
+            # Semantic score (40% weight)
+            if "semantic_score" in result:
+                final_score += 0.4 * result["semantic_score"]
+                score_count += 0.4
+            
+            # Rerank score (40% weight)  
+            if "rerank_score" in result:
+                final_score += 0.4 * result["rerank_score"]
+                score_count += 0.4
+            
+            # Quality score (20% weight)
+            quality_metrics = result.get("quality_metrics", {})
+            if quality_metrics:
+                quality_score = quality_metrics.get("quality_score", 0.0)
+                final_score += 0.2 * quality_score
+                score_count += 0.2
+            
+            # Normalize score
+            if score_count > 0:
+                result["final_score"] = final_score / score_count
+            else:
+                result["final_score"] = 0.5  # Default score
+        
+        # Sort by final score
+        deduplicated.sort(key=lambda x: x.get("final_score", 0), reverse=True)
+        
+        # Return top N results
+        return deduplicated[:n_results]
+    
+    def _remove_duplicates(self, results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Remove duplicate results based on URL and content similarity"""
+        
+        seen_urls = set()
+        unique_results = []
+        
+        for result in results:
+            url = result.get("url", "")
+            
+            # Normalize URL for comparison
+            normalized_url = url.lower().rstrip('/')
+            
+            if normalized_url not in seen_urls:
+                seen_urls.add(normalized_url)
+                unique_results.append(result)
+        
+        return unique_results
+    
+    def _generate_cache_key(self, query: str, n_results: int, fresh_only: bool, require_full_fetch: bool) -> str:
+        """Generate cache key for the search parameters"""
+        return f"search:{hash(query)}:{n_results}:{fresh_only}:{require_full_fetch}:{settings.EMBEDDING_MODEL}:{settings.RERANKER_MODEL}"
+    
+    async def get_search_suggestions(self, partial_query: str) -> List[str]:
+        """Get search suggestions based on partial query"""
+        # This could be implemented with a suggestion service
+        # For now, return empty list
+        return []
+    
+    def get_health_status(self) -> Dict[str, Any]:
+        """Get health status of all components"""
+        return {
+            "aggregator_initialized": self.initialized,
+            "embedding_service": embedding_service.get_model_info(),
+            "content_extractor": "available",
+            "reranker": "available" if reranker._model_loaded else "unavailable",
+            "cache": "enabled" if settings.CACHE_ENABLED else "disabled"
+        }
+
+# Global aggregator instance
+search_aggregator = AdvancedSearchAggregator()
+
+
+#!/usr/bin/env python3
+import asyncio
+import logging
+import sys
+from typing import Any, Sequence
+import mcp.types as types
+from mcp.server import Server
+from mcp.server.models import InitializationOptions
+import mcp.server.stdio
+from .search.aggregator import search_aggregator
+from .config.settings import settings
+
+# Configure logging
+logging.basicConfig(
+    level=getattr(logging, settings.LOG_LEVEL),
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    handlers=[logging.StreamHandler(sys.stderr)]
+)
+logger = logging.getLogger(__name__)
+
+# Create MCP server instance
+server = Server("mcp-web-search-enhanced")
+
+@server.list_tools()
+async def handle_list_tools() -> list[types.Tool]:
+    """List available tools"""
+    return [
+        types.Tool(
+            name="search_web",
+            description="Search the web with advanced AI-powered ranking and full content extraction. Uses state-of-the-art embedding and reranking models for optimal relevance.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "q": {
+                        "type": "string",
+                        "description": "Search query - be specific for better results"
+                    },
+                    "n_results": {
+                        "type": "integer",
+                        "description": "Number of results to return (1-20)",
+                        "minimum": 1,
+                        "maximum": 20,
+                        "default": 5
+                    },
+                    "fresh_only": {
+                        "type": "boolean",
+                        "description": "Prefer recent content only",
+                        "default": False
+                    },
+                    "require_full_fetch": {
+                        "type": "boolean", 
+                        "description": "Extract full content from pages (recommended for LLM use)",
+                        "default": True
+                    },
+                    "enable_reranking": {
+                        "type": "boolean",
+                        "description": "Enable advanced reranking for higher precision (slower but more accurate)",
+                        "default": None
+                    }
+                },
+                "required": ["q"]
+            }
+        )
+    ]
+
+@server.call_tool()
+async def handle_call_tool(
+    name: str, 
+    arguments: dict[str, Any] | None
+) -> list[types.TextContent | types.ImageContent | types.EmbeddedResource]:
+    """Handle tool execution"""
+    
+    if name != "search_web":
+        raise ValueError(f"Unknown tool: {name}")
+    
+    if not arguments:
+        raise ValueError("No arguments provided")
+    
+    # Validate required argument
+    query = arguments.get("q")
+    if not query:
+        raise ValueError("Query parameter 'q' is required")
+    
+    # Extract parameters with defaults
+    n_results = arguments.get("n_results", 5)
+    fresh_only = arguments.get("fresh_only", False)
+    require_full_fetch = arguments.get("require_full_fetch", True)
+    enable_reranking = arguments.get("enable_reranking", None)
+    
+    # Validate parameters
+    if not isinstance(n_results, int) or n_results < 1 or n_results > 20:
+        raise ValueError("n_results must be an integer between 1 and 20")
+    
+    try:
+        logger.info(f"Processing search request: query='{query}', n_results={n_results}")
+        
+        # Perform search
+        result = await search_aggregator.search(
+            query=query,
+            n_results=n_results,
+            fresh_only=fresh_only,
+            require_full_fetch=require_full_fetch,
+            enable_reranking=enable_reranking
+        )
+        
+        # Format result for MCP
+        if "error" in result:
+            error_msg = f"Search failed: {result['error']}"
+            logger.error(error_msg)
+            return [types.TextContent(type="text", text=error_msg)]
+        
+        # Format successful response
+        response_text = _format_search_response(result)
+        
+        return [types.TextContent(type="text", text=response_text)]
+        
+    except Exception as e:
+        error_msg = f"Search execution failed: {str(e)}"
+        logger.error(error_msg, exc_info=True)
+        return [types.TextContent(type="text", text=error_msg)]
+
+def _format_search_response(result: dict[str, Any]) -> str:
+    """Format search result for MCP response"""
+    
+    query = result.get("query", "")
+    results = result.get("results", [])
+    total_found = result.get("total_found", 0)
+    returned = result.get("returned", len(results))
+    search_time = result.get("search_time", 0)
+    ai_enhanced = result.get("ai_enhanced", False)
+    processing_info = result.get("processing_info", {})
+    
+    # Build response
+    response_lines = [
+        f"# Web Search Results for: {query}",
+        "",
+        f"**Found:** {total_found} results | **Returned:** {returned} results | **Time:** {search_time}s",
+    ]
+    
+    # Add AI enhancement info
+    if ai_enhanced:
+        ai_info = []
+        if processing_info.get("semantic_ranking"):
+            ai_info.append(f"Semantic ranking with {processing_info.get('embedding_model', 'unknown')}")
+        if processing_info.get("reranking"):
+            ai_info.append(f"Reranked with {processing_info.get('reranker_model', 'unknown')}")
+        
+        if ai_info:
+            response_lines.extend([
+                f"**AI Enhanced:** {' + '.join(ai_info)}",
+                ""
+            ])
+    
+    # Add results
+    if not results:
+        response_lines.extend([
+            "",
+            "No results found. Try:",
+            "- Different keywords",
+            "- More general terms", 
+            "- Check spelling"
+        ])
+    else:
+        response_lines.append("")
+        
+        for i, doc in enumerate(results, 1):
+            response_lines.extend(_format_single_result(doc, i))
+    
+    # Add processing summary
+    if processing_info:
+        response_lines.extend([
+            "",
+            "---",
+            "**Processing Details:**"
+        ])
+        
+        if processing_info.get("content_extraction"):
+            response_lines.append("✅ Full content extraction enabled")
+        if processing_info.get("semantic_ranking"):
+            response_lines.append("✅ AI semantic ranking applied")
+        if processing_info.get("reranking"):
+            response_lines.append("✅ Advanced reranking applied")
+    
+    return "\n".join(response_lines)
+
+def _format_single_result(doc: dict[str, Any], index: int) -> list[str]:
+    """Format a single search result"""
+    
+    lines = [f"## {index}. {doc.get('title', 'Untitled')}"]
+    
+    # URL
+    url = doc.get('url', '')
+    if url:
+        lines.append(f"**URL:** {url}")
+    
+    # Scores (if available)
+    score_parts = []
+    if 'semantic_score' in doc:
+        score_parts.append(f"Semantic: {doc['semantic_score']:.3f}")
+    if 'rerank_score' in doc:
+        score_parts.append(f"Rerank: {doc['rerank_score']:.3f}")
+    if 'final_score' in doc:
+        score_parts.append(f"Final: {doc['final_score']:.3f}")
+    
+    if score_parts:
+        lines.append(f"**Relevance:** {' | '.join(score_parts)}")
+    
+    # Metadata
+    metadata = doc.get('metadata', {})
+    if isinstance(metadata, dict):
+        meta_parts = []
+        
+        if metadata.get('author'):
+            meta_parts.append(f"Author: {metadata['author']}")
+        if metadata.get('publish_date'):
+            meta_parts.append(f"Published: {metadata['publish_date']}")
+        if metadata.get('language'):
+            meta_parts.append(f"Language: {metadata['language']}")
+        
+        if meta_parts:
+            lines.append(f"**Info:** {' | '.join(meta_parts)}")
+    
+    # Content (prioritize full content over snippet)
+    content = doc.get('content') or doc.get('markdown') or doc.get('snippet', '')
+    if content:
+        # Truncate very long content for readability
+        if len(content) > 1000:
+            content = content[:1000] + "..."
+        
+        lines.extend([
+            "**Content:**",
+            content,
+        ])
+    
+    # Quality metrics (if available)
+    quality_metrics = doc.get('quality_metrics', {})
+    if quality_metrics:
+        word_count = quality_metrics.get('word_count')
+        reading_time = quality_metrics.get('reading_time_minutes')
+        quality_score = quality_metrics.get('quality_score')
+        
+        quality_parts = []
+        if word_count:
+            quality_parts.append(f"{word_count} words")
+        if reading_time:
+            quality_parts.append(f"{reading_time} min read")
+        if quality_score:
+            quality_parts.append(f"Quality: {quality_score:.2f}")
+        
+        if quality_parts:
+            lines.append(f"**Metrics:** {' | '.join(quality_parts)}")
+    
+    lines.append("")  # Empty line between results
+    return lines
+
+async def main():
+    """Main entry point for MCP server"""
+    
+    # Initialize the search aggregator
+    try:
+        await search_aggregator.initialize()
+        logger.info("MCP Web Search Server initialized successfully")
+        logger.info(f"Configuration: {settings.EMBEDDING_MODEL} + {settings.RERANKER_MODEL}")
+    except Exception as e:
+        logger.error(f"Failed to initialize search aggregator: {e}")
+        sys.exit(1)
+    
+    # Run MCP server
+    async with mcp.server.stdio.stdio_server() as (read_stream, write_stream):
+        await server.run(
+            read_stream,
+            write_stream,
+            InitializationOptions(
+                server_name="mcp-web-search-enhanced",
+                server_version="2.0.0",
+                capabilities=server.get_capabilities(
+                    notification_options=None,
+                    experimental_capabilities={}
+                )
+            )
+        )
+
+if __name__ == "__main__":
+    asyncio.run(main())
+
+
+# Existing dependencies
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+httpx>=0.25.0
+beautifulsoup4>=4.12.0
+lxml>=4.9.0
+pydantic>=2.4.0
+redis>=5.0.0
+python-dotenv>=1.0.0
+mcp>=1.0.0
+
+# AI and ML dependencies - UPDATED
+torch>=2.0.0
+sentence-transformers>=2.2.2
+transformers>=4.35.0
+FlagEmbedding>=1.2.0
+numpy>=1.24.0
+scikit-learn>=1.3.0
+
+# Content processing - NEW
+html2text>=2020.1.16
+readability-lxml>=0.8.1
+langdetect>=1.0.9
+markdownify>=0.11.6
+
+# Enhanced web scraping
+requests>=2.31.0
+selenium>=4.15.0
+undetected-chromedriver>=3.5.0
+
+# Performance and caching
+asyncio-throttle>=1.0.2
+aiofiles>=23.2.1
+cachetools>=5.3.0
+
+# Development and testing
+pytest>=7.4.0
+pytest-asyncio>=0.21.0
+black>=23.9.0
+flake8>=6.1.0
+
+
+
+FROM python:3.11-alpine AS builder
+
+# Install build dependencies
+RUN apk add --no-cache \
+    build-base \
+    libffi-dev \
+    openssl-dev \
+    rust \
+    cargo \
+    git \
+    curl
+
+# Create virtual environment
+RUN python -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+# Copy requirements and install Python dependencies
+COPY requirements.txt .
+RUN pip install --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt
+
+# Download common models to reduce startup time
+RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('dunzhang/stella_en_1.5B_v5')" || echo "Model download failed, will download at runtime"
+
+# Runtime stage
+FROM python:3.11-alpine AS runtime
+
+# Install runtime dependencies
+RUN apk add --no-cache \
+    libffi \
+    openssl \
+    curl \
+    chromium \
+    chromium-chromedriver
+
+# Create non-root user
+RUN addgroup -g 1001 -S appgroup && \
+    adduser -u 1001 -S appuser -G appgroup
+
+# Copy virtual environment from builder
+COPY --from=builder /opt/venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+# Set working directory
+WORKDIR /app
+
+# Copy application code
+COPY --chown=appuser:appgroup . .
+
+# Create necessary directories
+RUN mkdir -p /app/logs /app/cache && \
+    chown -R appuser:appgroup /app
+
+# Switch to non-root user
+USER appuser
+
+# Environment variables
+ENV PYTHONPATH=/app
+ENV PYTHONUNBUFFERED=1
+ENV EMBEDDING_MODEL=nomic-ai/stella_en_1.5B_v5
+ENV RERANKER_MODEL=BAAI/bge-reranker-v2-m3
+ENV ENABLE_SEMANTIC_RANKING=true
+ENV ENABLE_RERANKING=true
+ENV MARKDOWN_OPTIMIZATION=true
+ENV JAVASCRIPT_ENABLED=true
+ENV LOG_LEVEL=INFO
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD python -c "import httpx; httpx.get('http://localhost:8001/health')" || exit 1
+
+# Default command (can be overridden)
+CMD ["python", "-m", "src.server"]
+
+# Expose port
+EXPOSE 8001
+
+# Server Configuration
+SERVER_MODE=stdio
+HOST=0.0.0.0
+PORT=8001
+LOG_LEVEL=INFO
+
+# Search Configuration
+SEARXNG_URL=https://searx.be
+DUCKDUCKGO_FALLBACK=true
+MAX_RESULTS=20
+TIMEOUT_SECONDS=30
+
+# AI Models Configuration - ENHANCED
+OLLAMA_URL=http://localhost:11434
+EMBEDDING_MODEL=nomic-ai/stella_en_1.5B_v5
+RERANKER_MODEL=BAAI/bge-reranker-v2-m3
+EMBEDDING_DIMENSIONS=1024
+RERANKER_MAX_LENGTH=8192
+ENABLE_SEMANTIC_RANKING=true
+ENABLE_RERANKING=true
+
+# Content Extraction Configuration - NEW
+ENABLE_STRUCTURED_EXTRACTION=true
+MARKDOWN_OPTIMIZATION=true
+EXTRACT_METADATA=true
+JAVASCRIPT_ENABLED=true
+STEALTH_MODE=true
+
+# Performance Configuration
+MAX_CONCURRENT_EXTRACTIONS=5
+CONTENT_CACHE_TTL=3600
+MIN_CONTENT_LENGTH=100
+MAX_CONTENT_LENGTH=50000
+
+# Caching Configuration
+CACHE_ENABLED=false
+REDIS_URL=redis://localhost:6379
+
+
+# Installer Stella embedding model
+ollama pull nomic-ai/stella_en_1.5B_v5
+
+# Installer BGE-M3 (alternative)
+ollama pull bge-m3
+
+# Installer BGE reranker (si disponible)
+ollama pull baai/bge-reranker-v2-m3
+
+
+
+# Copier le nouveau fichier d'environnement
+cp .env.example .env
+
+# Modifier selon vos besoins
+nano .env
+
+
+
+# Installer les nouvelles dépendances
+pip install -r requirements.txt
+
+# Ou reconstruire l'image Docker
+docker build -t mcp-web-search-enhanced .
+
+
+
+# Test HTTP mode
+curl -X POST "http://localhost:8001/search" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "q": "artificial intelligence 2025",
+    "n_results": 3,
+    "require_full_fetch": true,
+    "enable_reranking": true
+  }'
+
+# Test MCP mode
+echo '{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "search_web", "arguments": {"q": "machine learning", "n_results": 3}}}' | python -m src.mcp_server

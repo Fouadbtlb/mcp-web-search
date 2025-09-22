@@ -1,257 +1,207 @@
-# MCP Web Search Server 🔎
+# MCP Web Search Server V2 �
 
 [![GitHub Stars](https://img.shields.io/github/stars/Fouadbtlb/mcp-web-search?style=social)](https://github.com/Fouadbtlb/mcp-web-search)
 [![GitHub Release](https://img.shields.io/github/v/release/Fouadbtlb/mcp-web-search)](https://github.com/Fouadbtlb/mcp-web-search/releases)
-[![Docker Pulls](https://img.shields.io/docker/pulls/boutalebfouad/mcp-web-search)](https://hub.docker.com/r/boutalebfouad/mcp-web-search)  
-[![Image Size](https://img.shields.io/docker/image-size/boutalebfouad/mcp-web-search/latest)](https://hub.docker.com/r/boutalebfouad/mcp-web-search)  
+[![Docker Pulls](https://img.shields.io/docker/pulls/boutalebfouad/mcp-web-search)](https://hub.docker.com/r/boutalebfouad/mcp-web-search)
+[![Image Size](https://img.shields.io/docker/image-size/boutalebfouad/mcp-web-search/latest)](https://hub.docker.com/r/boutalebfouad/mcp-web-search)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-A lightweight **Model Context Protocol (MCP)** server for intelligent web search — multi-source aggregation, full content extraction and AI-powered semantic ranking. Designed for easy integration with AI assistants (OpenWebUI, Claude, custom MCP clients) and for deployment in production using Docker.
+**MCP Web Search V2** is a complete overhaul, transforming the service into a multi-stage, AI-powered search pipeline. It's designed for deep integration with LLMs and AI Agents, providing highly relevant, content-rich results by orchestrating fetching, extraction, semantic ranking, and reranking.
 
 ---
 
-## ✨ Quick highlights
+## ✨ V2 Highlights
 
-- 🚀 Multi-engine search (SearxNG + DuckDuckGo fallback)
-- 🧠 AI-powered semantic ranking (embeddings via Ollama or local fallback)
-- 📄 Full article extraction (not only snippets)
-- ⚡ Lightweight: ~150MB Alpine image, fast startup
-- 🔗 Dual modes: **stdio (MCP)** and **HTTP (REST)**
-- 🩺 Production features: health checks, optional Redis cache, monitoring hooks
-
----
-
-## 🧰 Features
-
-- **Multi-Source Aggregation** — query SearxNG first and fallback to other engines when needed.
-- **Semantic Ranking** — embed results and score by similarity to query.
-- **Full Content Extraction** — pull article text, metadata (author, publish_date, language).
-- **Freshness & Quality** — freshness weighting, reading-time estimation, deduplication.
-- **MCP Tool** — exposes a `search_web` tool for MCP clients.
-- **HTTP API** — `POST /search`, `GET /health`, `GET /docs` (Swagger UI).
-- **Docker-first** — healthcheck-ready container and simple compose examples.
+- 🧠 **Multi-Stage AI Pipeline**: Fetch -> Extract -> Rank -> Rerank for state-of-the-art relevance.
+- 🏆 **Advanced AI Models**: Utilizes powerful embedding (`nomic-ai/stella_en_1.5B_v5`) and reranker (`BAAI/bge-reranker-v2-m3`) models.
+- 📄 **Firecrawl-Inspired Extractor**: Advanced content extraction that finds the main article on a page and converts it to clean, LLM-optimized Markdown.
+- 🌐 **JavaScript Rendering**: Uses Pyppeteer (Chromium) to render dynamic web pages, ensuring content from SPAs is fully captured.
+- ⚙️ **Flexible Search Modes**: Choose between `full` (all stages), `semantic` (fetch + embedding), or `fast` (quick fetch) search modes.
+- 🐳 **Optimized Docker Build**: Multi-stage Dockerfile for a smaller, more efficient production image.
+- 🔧 **Simplified Configuration**: All settings managed through a single `.env` file and Pydantic settings.
 
 ---
 
-## 🚀 Quick start
+##  архитектура V2
 
-### Run (HTTP mode)
+The V2 architecture is a sequential pipeline designed to maximize relevance and content quality.
+
+1.  **Fetch**: Gathers initial search results from multiple sources (`searxng`, `duckduckgo`).
+2.  **Extract**: For each URL, fetches the full page content. It uses multiple extraction techniques and JS rendering to find the main content and converts it to clean Markdown.
+3.  **Semantic Rank**: Generates embeddings for the query and all extracted content, then calculates cosine similarity to perform an initial semantic ranking.
+4.  **Rerank**: Takes the top N semantically similar documents and uses a powerful cross-encoder model to perform a final, highly accurate reranking.
+
+---
+
+## 🚀 Quick Start
+
+### 1. Create Environment File
+
+Create a `.env` file in the project root by copying the example:
 
 ```bash
-docker run -d --name mcp-web-search \
-  -p 8001:8001 \
-  -e SERVER_MODE=http \
-  -e SEARXNG_URL=https://searx.be \
-  boutalebfouad/mcp-web-search:latest
+cp .env.example .env
 ```
 
-Check health:
+Review and edit the `.env` file to suit your needs. You can enable/disable services like Ollama or change the models used.
+
+### 2. Run with Docker Compose
+
+The recommended way to run the V2 server is with Docker Compose.
 
 ```bash
-curl http://localhost:8001/health
+docker-compose -f docker/docker-compose.yml up -d --build
 ```
 
-### Docker Compose (recommended for local dev)
+This will build the image and start the server, which will be accessible on `http://localhost:8000` by default.
 
-```yaml
-version: '3.8'
-services:
-  mcp-web-search:
-    image: boutalebfouad/mcp-web-search:latest
-    ports:
-      - "8001:8001"
-    environment:
-      - SERVER_MODE=http
-      - SEARXNG_URL=https://searx.be
-      - OLLAMA_URL=http://ollama:11434
-    restart: unless-stopped
+### 3. Test the Server
 
-  # Optional: local Ollama and Redis
-  ollama:
-    image: ollama/ollama:latest
-    ports:
-      - "11434:11434"
-    volumes:
-      - ollama_data:/root/.ollama
+Check the status endpoint to see if all services are running:
 
-  redis:
-    image: redis:7-alpine
-    command: redis-server --maxmemory 256mb
+```bash
+curl http://localhost:8000/status
+```
 
-volumes:
-  ollama_data:
+Perform your first search:
+
+```bash
+curl -X POST http://localhost:8000/search \
+-H "Content-Type: application/json" \
+-d '{
+  "query": "Latest news on AI in 2025",
+  "max_results": 5,
+  "search_mode": "full"
+}'
 ```
 
 ---
 
-## ⚙️ Configuration (environment variables)
+## ⚙️ Configuration (`.env` file)
+
+All configuration is now handled via an `.env` file. See `.env.example` for all available options.
 
 | Variable | Default | Description |
-|---|---:|---|
-| `SERVER_MODE` | `stdio` | `stdio` (MCP) or `http` (REST) |
-| `SEARXNG_URL` | `https://searx.be` | SearxNG instance URL |
-| `OLLAMA_URL` | `` | Ollama server for embeddings (optional) |
-| `EMBEDDING_MODEL` | `all-minilm` | Embedding model name |
-| `REDIS_URL` | `` | Redis for caching (optional) |
-| `LOG_LEVEL` | `INFO` | Logging verbosity |
-| `CACHE_ENABLED` | `false` | Enable result caching |
+|---|---|---|
+| `HTTP_PORT` | `8000` | Port for the HTTP server. |
+| `MCP_PORT` | `8001` | Port for the MCP server (if run with `--mcp`). |
+| `LOG_LEVEL` | `INFO` | Logging verbosity. |
+| `SEARXNG_INSTANCES` | `https://searx.be,...` | Comma-separated list of SearxNG instances. |
+| `EMBEDDING_MODEL` | `nomic-ai/stella_en_1.5B_v5` | HuggingFace model for embeddings. |
+| `RERANKER_MODEL` | `BAAI/bge-reranker-v2-m3` | HuggingFace model for reranking. |
+| `RERANKING_ENABLED`| `true` | Whether to use the reranking stage. |
+| `OLLAMA_URL` | `http://localhost:11434` | URL for an Ollama instance (optional). |
+| `EXTRACTION_MODE` | `readability` | Content extraction strategy. |
+| `LLM_OPTIMIZED_MARKDOWN` | `true` | Convert extracted content to clean Markdown. |
+| `ENABLE_JS_RENDERING` | `true` | Use Chromium to render JavaScript on pages. |
+| `CACHE_ENABLED` | `true` | Enable caching for search results. |
+| `CACHE_TTL` | `3600` | Cache Time-To-Live in seconds. |
 
 ---
 
-## 📡 HTTP API
+## 📡 HTTP API (V2)
 
 ### `POST /search`
 
-**Request** (JSON):
+**Request**:
 
 ```json
 {
-  "q": "AI news 2025",
-  "n_results": 5,
-  "fresh_only": false,
-  "require_full_fetch": true
+  "query": "What is the Model Context Protocol?",
+  "max_results": 10,
+  "search_mode": "full",
+  "use_cache": true
 }
 ```
 
-**Response** (excerpt):
+- `search_mode`: Can be `full`, `semantic`, or `fast`.
+
+**Response**:
 
 ```json
 {
-  "query": "AI news 2025",
+  "query": "What is the Model Context Protocol?",
+  "message": "Successfully found 10 results.",
   "results": [
     {
-      "url": "https://example.com/article",
-      "title": "Article Title",
-      "snippet": "Short summary...",
-      "content": "Full article text...",
-      "author": "Author Name",
-      "publish_date": "2025-01-15",
-      "language": "en",
-      "semantic_score": 0.89,
-      "combined_score": 0.92
+      "url": "https://modelcontextprotocol.io/",
+      "title": "Model Context Protocol",
+      "snippet": "An open standard for AI model interaction...",
+      "content": "# Model Context Protocol\n\nAn open standard for...",
+      "markdown": "# Model Context Protocol...",
+      "semantic_score": 0.95,
+      "rerank_score": 0.998
     }
   ],
-  "intent": { "detected": "news", "confidence": 0.85 }
-}
-```
-
-### `GET /health`
-
-Returns service status (health, version, dependencies availability).
-
-### `GET /docs`
-
-Interactive Swagger UI for the HTTP API.
-
----
-
-## 🔌 MCP integration (stdio)
-
-When running in `stdio` mode the server exposes a tool named `search_web` that MCP clients can call. Example tool schema:
-
-```json
-{
-  "name": "search_web",
-  "description": "Search the web with AI-powered ranking",
-  "inputSchema": {
-    "type": "object",
-    "properties": {
-      "q": { "type": "string", "description": "Search query" },
-      "n_results": { "type": "integer", "description": "Number of results (1-20)", "minimum": 1, "maximum": 20 }
-    },
-    "required": ["q"]
+  "metadata": {
+    "result_count": 10,
+    "embedding_model": "nomic-ai/stella_en_1.5B_v5",
+    "reranker_model": "BAAI/bge-reranker-v2-m3"
   }
 }
 ```
 
-Example (stdio JSON-RPC call):
+### `GET /status`
+
+Returns the status of all internal services, including loaded models and cache status.
+
+---
+
+## 🔌 MCP Integration (V2)
+
+The MCP `search` tool now supports the `search_mode` parameter.
+
+Example MCP call:
 
 ```bash
 echo '{
   "jsonrpc": "2.0",
   "id": 1,
   "method": "tools/call",
-  "params": { "name": "search_web", "arguments": { "q": "python machine learning tutorial", "n_results": 5 } }
-}' | docker run --rm -i boutalebfouad/mcp-web-search:latest
+  "params": {
+    "name": "search",
+    "arguments": {
+      "query": "python machine learning tutorial",
+      "max_results": 5,
+      "search_mode": "semantic"
+    }
+  }
+}' | docker run --rm -i mcp-web-search:2.0.0 --mcp
 ```
-
----
-
-## 🐳 Docker tags
-
-- `latest` — latest stable release
-- `v1.3.0-stable` — pinned stable release
-- `develop` — development build
-
----
-
-## ⚠️ Troubleshooting
-
-**No results**
-- Verify `SEARXNG_URL` is reachable from the container.
-- Check network/DNS settings.
-
-**High memory usage**
-- Use CPU-only mode by leaving `OLLAMA_URL` empty.
-- Disable caching or lower concurrency.
-
-**Status shows `unhealthy`**
-- `docker logs mcp-web-search` and inspect startup errors.
-- Ensure `curl -f http://localhost:8001/health` from inside container succeeds.
 
 ---
 
 ## 🧪 Development
 
-Local dev quickstart:
+The project now uses **Poetry** for dependency management.
 
 ```bash
-git clone https://github.com/your-repo/mcp-web-search.git
+git clone https://github.com/Fouadbtlb/mcp-web-search.git
 cd mcp-web-search
-python -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
+poetry install
+poetry shell
 python -m src.server
 ```
 
 Build the container locally:
 
 ```bash
-docker build -t mcp-web-search:dev .
+docker-compose -f docker/docker-compose.yml build
 ```
 
 ---
 
-## 📄 Contributing
+## 🤝 Contributing
 
-Contributions are welcome! Please check out the [GitHub repository](https://github.com/Fouadbtlb/mcp-web-search) to:
-- 🐛 Report bugs or request features via [Issues](https://github.com/Fouadbtlb/mcp-web-search/issues)
-- 🔀 Submit pull requests with improvements
-- 📖 Improve documentation
+Contributions to V2 are highly encouraged! The new architecture is more modular and easier to extend.
+
+- 🐛 Report bugs or request features via [Issues](https://github.com/Fouadbtlb/mcp-web-search/issues).
+- 🔀 Submit pull requests with improvements.
 - ⭐ Star the repo if you find it useful!
-
----
-
-## 🤝 Support & Links
-
-- **📂 Source Code**: [GitHub Repository](https://github.com/Fouadbtlb/mcp-web-search)
-- **🐳 Docker Image**: [Docker Hub](https://hub.docker.com/r/boutalebfouad/mcp-web-search)
-- **🐛 Issues & Features**: [GitHub Issues](https://github.com/Fouadbtlb/mcp-web-search/issues)
-- **📋 MCP Protocol**: [Model Context Protocol](https://modelcontextprotocol.io)
 
 ---
 
 ## ⚖️ License
 
 This project is released under the **MIT License**. See [`LICENSE`](https://github.com/Fouadbtlb/mcp-web-search/blob/main/LICENSE) for details.
-
----
-
-## 🙏 Acknowledgements
-
-Built on top of: SearxNG, Ollama, FastAPI and the Model Context Protocol ecosystem.
-
----
-
-**⭐ Star the [GitHub repo](https://github.com/Fouadbtlb/mcp-web-search) if you find this useful!**
 

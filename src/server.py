@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-MCP Web Search Server with HTTP and MCP Protocol Support
-Serveur MCP pour recherche web avec extraction de contenu
+MCP Web Search Server - V2
+A multi-stage, AI-powered search server.
 """
 
 import asyncio
@@ -23,14 +23,20 @@ from .search.aggregator import SearchAggregator
 from .search.fetcher import ContentFetcher
 from .search.extractor import ContentExtractor
 from .search.cache import SearchCache
-from .search.embeddings import EmbeddingProcessor
+from .search.embeddings import AdvancedEmbeddingService
 from .utils.normalizer import QueryNormalizer
 from .utils.quality import QualityFilter
 from .utils.intent_classifier import QueryIntentClassifier
 from .config.settings import settings
 
+
+# Setup logging
+logging.basicConfig(level=settings.LOG_LEVEL.upper())
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+logging.getLogger("urllib3").setLevel(logging.WARNING)
+
 # Configuration du logging
-settings.setup_logging()
 logger = logging.getLogger(__name__)
 
 # Global search service instance
@@ -138,18 +144,24 @@ class WebSearchMCP:
         self.aggregator = SearchAggregator()
         self.fetcher = ContentFetcher()
         self.extractor = ContentExtractor()
-        self.cache = SearchCache() if settings.config.cache.enabled else None
+        self.cache = SearchCache() if settings.CACHE_ENABLED else None
+        self.embeddings = AdvancedEmbeddingService()
         self.normalizer = QueryNormalizer()
-        self.quality_filter = QualityFilter()
+        
+        # Le filtre de qualité peut être en mode debug
+        if settings.LOG_LEVEL == "DEBUG":
+            self.quality_filter = QualityFilter(debug=True)
+        else:
+            self.quality_filter = QualityFilter()
+            
         self.intent_classifier = QueryIntentClassifier()
-        self.embeddings = EmbeddingProcessor()
         
         # Initialize components
         self._initialized = False
         
         logger.info("Serveur MCP Web Search initialisé")
-        if settings.config.debug:
-            logger.debug(f"Configuration: {settings.to_dict()}")
+        if settings.LOG_LEVEL == "DEBUG":
+            logger.debug(f"Configuration: {settings.model_dump_json(indent=2)}")
 
     async def initialize(self):
         """Initialize async components"""
@@ -375,8 +387,7 @@ class WebSearchMCP:
             extracted_content = await self.extractor.extract_for_llm(
                 content_data["content"],  # Use "content" key instead of "html"
                 url,
-                query,  # Pass the query for better processing
-                content_types
+                query  # Pass the query for better processing
             )
             
             # Formatage du résultat final
@@ -540,9 +551,9 @@ async def main():
     """Point d'entrée principal du serveur"""
     
     # Validation de la configuration
-    if not settings.validate_config():
-        logger.error("Configuration invalide, arrêt du serveur")
-        sys.exit(1)
+    # if not settings.validate_config():
+    #     logger.error("Configuration invalide, arrêt du serveur")
+    #     sys.exit(1)
     
     # Check for server mode
     mode = os.getenv("SERVER_MODE", "stdio")  # Default to stdio for MCP

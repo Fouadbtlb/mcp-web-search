@@ -1,255 +1,293 @@
-import logging
-import os
 import asyncio
-from typing import List, Optional, Dict, Any, Tuple
-import aiohttp
-import json
+import logging
+from typing import List, Dict, Any, Optional
+import httpx
+import numpy as np
+from sentence_transformers import SentenceTransformer
+import torch
+from sklearn.metrics.pairwise import cosine_similarity
+from ..config.settings import settings
 
 logger = logging.getLogger(__name__)
 
-class EmbeddingProcessor:
-    """Lightweight embedding processor with Ollama and CPU-only fallback"""
+class AdvancedEmbeddingService:
+    """Advanced embedding service using Stella model"""
     
     def __init__(self):
-        self.ollama_url = os.getenv('OLLAMA_URL', 'http://localhost:11434')
-        self.embedding_model = os.getenv('EMBEDDING_MODEL', 'all-minilm')
-        self.max_chunk_size = int(os.getenv('MAX_CHUNK_SIZE', '512'))
+        self.model_name = settings.EMBEDDING_MODEL
+        self.dimensions = settings.EMBEDDING_DIMENSIONS
+        self.model = None
+        self.ollama_available = False
+        self._model_loaded = False
         
-        # Lightweight fallback embeddings
-        self._fallback_embedder = None
-        self._use_ollama = None
-        
-    async def initialize(self):
-        """Initialize the embedding system"""
-        # Test Ollama availability
-        self._use_ollama = await self._test_ollama_connection()
-        
-        if not self._use_ollama:
-            logger.info("Ollama not available, using CPU-only fallback")
-            await self._init_fallback_embedder()
-        else:
-            logger.info(f"Using Ollama embeddings at {self.ollama_url}")
-            await self._ensure_embedding_model()
-    
-    async def _test_ollama_connection(self) -> bool:
-        """Test if Ollama is available"""
+    async def initialize(self) -> bool:
+        """Initialize the embedding service"""
         try:
-            timeout = aiohttp.ClientTimeout(total=5)
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.get(f"{self.ollama_url}/api/tags") as response:
-                    return response.status == 200
+            # Try Ollama first
+            if settings.OLLAMA_URL:
+                if await self._check_ollama_availability():
+                    self.ollama_available = True
+                    self._model_loaded = True
+                    logger.info("Ollama embedding service is available.")
+                    return True
+                
+            # Load local model as fallback
+            if not self.ollama_available:
+                return await self._load_local_model()
+                
+            return True
         except Exception as e:
-            logger.debug(f"Ollama connection test failed: {e}")
+            logger.error(f"Failed to initialize embedding service: {e}")
             return False
     
-    async def _ensure_embedding_model(self):
-        """Ensure the embedding model is available in Ollama"""
+    async def _check_ollama_availability(self) -> bool:
+        """Check if Ollama server is available with our model"""
         try:
-            async with aiohttp.ClientSession() as session:
-                # Check if model exists
-                async with session.get(f"{self.ollama_url}/api/tags") as response:
-                    if response.status == 200:
-                        data = await response.json()
-                        models = [m['name'] for m in data.get('models', [])]
-                        
-                        if not any(self.embedding_model in model for model in models):
-                            logger.info(f"Pulling embedding model: {self.embedding_model}")
-                            # Pull the model
-                            pull_data = {"name": self.embedding_model, "stream": False}
-                            async with session.post(
-                                f"{self.ollama_url}/api/pull",
-                                json=pull_data,
-                                timeout=aiohttp.ClientTimeout(total=300)  # 5 minutes for model pull
-                            ) as pull_response:
-                                if pull_response.status == 200:
-                                    logger.info(f"Successfully pulled model: {self.embedding_model}")
-                                else:
-                                    logger.error(f"Failed to pull model: {await pull_response.text()}")
-                        else:
-                            logger.info(f"Model {self.embedding_model} already available")
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.get(settings.OLLAMA_URL)
+                if response.status_code != 200:
+                    logger.warning("Ollama server not reachable.")
+                    return False
+                
+                response = await client.post(f"{settings.OLLAMA_URL}/api/show", json={"name": self.model_name})
+                if response.status_code == 200:
+                    logger.info(f"Ollama has model '{self.model_name}' available.")
+                    return True
+                else:
+                    logger.warning(f"Ollama does not have model '{self.model_name}'. Please run 'ollama pull {self.model_name}'")
+                    return False
+                
         except Exception as e:
-            logger.error(f"Error ensuring embedding model: {e}")
-            # Fall back to CPU-only
-            self._use_ollama = False
-            await self._init_fallback_embedder()
+            logger.warning(f"Ollama availability check failed: {e}")
+            return False
     
-    async def _init_fallback_embedder(self):
-        """Initialize lightweight CPU-only embeddings"""
+    async def _load_local_model(self) -> bool:
+        """Load local SentenceTransformer model"""
         try:
-            # Use a simple TF-IDF based approach for minimal dependencies
-            from sklearn.feature_extraction.text import TfidfVectorizer
-            from sklearn.metrics.pairwise import cosine_similarity
-            import numpy as np
+            # Model mapping for local loading
+            model_mapping = {
+                "nomic-ai/stella_en_1.5B_v5": "dunzhang/stella_en_1.5B_v5",
+                # Add other mappings if needed
+            }
             
-            self._fallback_embedder = TfidfVectorizer(
-                max_features=384,  # Match common embedding dimensions
-                stop_words='english',
-                ngram_range=(1, 2),
-                max_df=0.95,
-                min_df=2
+            local_model_name = model_mapping.get(
+                self.model_name, 
+                self.model_name
             )
-            logger.info("Initialized CPU-only TF-IDF embeddings")
-        except ImportError:
-            logger.warning("scikit-learn not available, using basic text similarity")
-            self._fallback_embedder = None
+            
+            # Load in a thread to avoid blocking
+            loop = asyncio.get_event_loop()
+            self.model = await loop.run_in_executor(
+                None, 
+                SentenceTransformer, 
+                local_model_name,
+                device="cuda" if torch.cuda.is_available() else "cpu"
+            )
+            
+            self._model_loaded = True
+            logger.info(f"Local embedding model loaded: {local_model_name}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Failed to load local embedding model: {e}")
+            # Final fallback to a simple model
+            try:
+                self.model = SentenceTransformer('all-MiniLM-L6-v2')
+                self._model_loaded = True
+                logger.warning("Fell back to 'all-MiniLM-L6-v2' due to previous error.")
+                return True
+            except Exception as fallback_error:
+                logger.critical(f"Failed to load even the fallback model: {fallback_error}")
+                return False
     
-    async def embed_texts(self, texts: List[str]) -> List[List[float]]:
-        """Generate embeddings for texts"""
-        if not texts:
-            return []
+    async def generate_embeddings(
+        self, 
+        texts: List[str], 
+        normalize: bool = True
+    ) -> Optional[np.ndarray]:
+        """
+        Generate embeddings for a list of texts
         
-        if self._use_ollama:
-            return await self._embed_with_ollama(texts)
-        else:
-            return await self._embed_with_fallback(texts)
+        Args:
+            texts: List of text strings
+            normalize: Whether to normalize embeddings
+            
+        Returns:
+            Numpy array of embeddings or None if failed
+        """
+        if not texts:
+            return None
+            
+        try:
+            if self.ollama_available:
+                return await self._generate_ollama_embeddings(texts, normalize)
+            elif self._model_loaded:
+                return await self._generate_local_embeddings(texts, normalize)
+            else:
+                logger.error("No embedding model is available.")
+                return None
+                
+        except Exception as e:
+            logger.error(f"Embedding generation failed: {e}")
+            return None
     
-    async def _embed_with_ollama(self, texts: List[str]) -> List[List[float]]:
-        """Generate embeddings using Ollama"""
+    async def _generate_ollama_embeddings(
+        self, 
+        texts: List[str], 
+        normalize: bool
+    ) -> Optional[np.ndarray]:
+        """Generate embeddings using Ollama API"""
         embeddings = []
         
         try:
-            async with aiohttp.ClientSession() as session:
+            async with httpx.AsyncClient(timeout=30.0) as client:
                 for text in texts:
-                    # Truncate text if too long
-                    truncated_text = text[:self.max_chunk_size * 4]  # Rough char estimate
-                    
-                    embed_data = {
-                        "model": self.embedding_model,
-                        "prompt": truncated_text
-                    }
-                    
-                    async with session.post(
-                        f"{self.ollama_url}/api/embeddings",
-                        json=embed_data,
-                        timeout=aiohttp.ClientTimeout(total=30)
-                    ) as response:
-                        if response.status == 200:
-                            data = await response.json()
-                            embedding = data.get('embedding', [])
-                            embeddings.append(embedding)
-                        else:
-                            logger.error(f"Ollama embedding failed: {await response.text()}")
-                            # Use zero vector as fallback
-                            embeddings.append([0.0] * 384)
+                    response = await client.post(
+                        f"{settings.OLLAMA_URL}/api/embeddings",
+                        json={"model": self.model_name, "prompt": text}
+                    )
+                    if response.status_code == 200:
+                        embeddings.append(response.json()["embedding"])
+                    else:
+                        logger.warning(f"Ollama failed to generate embedding for a text snippet. Status: {response.status_code}")
+                        embeddings.append([0.0] * self.dimensions) # Placeholder
             
-        except Exception as e:
-            logger.error(f"Error generating Ollama embeddings: {e}")
-            # Fall back to basic embeddings
-            return await self._embed_with_fallback(texts)
-        
-        return embeddings
-    
-    async def _embed_with_fallback(self, texts: List[str]) -> List[List[float]]:
-        """Generate embeddings using CPU-only fallback"""
-        if self._fallback_embedder is None:
-            # Ultra-simple fallback: basic text features
-            return [self._simple_text_features(text) for text in texts]
-        
-        try:
-            # Use TF-IDF embeddings
-            import numpy as np
-            
-            # Fit or transform texts
-            if not hasattr(self._fallback_embedder, 'vocabulary_'):
-                # First time - fit the vectorizer
-                tfidf_matrix = self._fallback_embedder.fit_transform(texts)
+            if embeddings:
+                embeddings_array = np.array(embeddings, dtype=np.float32)
+                
+                if normalize:
+                    norms = np.linalg.norm(embeddings_array, axis=1, keepdims=True)
+                    embeddings_array = embeddings_array / norms
+                
+                return embeddings_array
             else:
-                tfidf_matrix = self._fallback_embedder.transform(texts)
+                return None
+                
+        except Exception as e:
+            logger.error(f"Ollama embedding generation failed: {e}")
+            return None
+    
+    async def _generate_local_embeddings(
+        self, 
+        texts: List[str], 
+        normalize: bool
+    ) -> Optional[np.ndarray]:
+        """Generate embeddings using local model"""
+        try:
+            # Run in executor to avoid blocking
+            loop = asyncio.get_event_loop()
+            embeddings = await loop.run_in_executor(
+                None, 
+                self.model.encode, 
+                texts, 
+                convert_to_tensor=False, 
+                normalize_embeddings=normalize,
+                show_progress_bar=False
+            )
             
-            # Convert to list of lists
-            embeddings = tfidf_matrix.toarray().tolist()
             return embeddings
             
         except Exception as e:
-            logger.error(f"TF-IDF embedding failed: {e}")
-            # Ultra-simple fallback
-            return [self._simple_text_features(text) for text in texts]
+            logger.error(f"Local embedding generation failed: {e}")
+            return None
     
-    def _simple_text_features(self, text: str) -> List[float]:
-        """Generate simple text features as ultra-lightweight fallback"""
-        # Basic text statistics as features (384 dimensions to match common models)
-        features = [0.0] * 384
+    async def calculate_semantic_similarity(
+        self, 
+        query: str, 
+        documents: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        """
+        Calculate semantic similarity between query and documents
         
-        if not text:
-            return features
-        
-        words = text.lower().split()
-        if not words:
-            return features
-        
-        # Basic features
-        features[0] = len(text)  # Character count
-        features[1] = len(words)  # Word count
-        features[2] = len(set(words))  # Unique word count
-        features[3] = sum(len(word) for word in words) / len(words)  # Avg word length
-        
-        # Character frequency features (simple)
-        for i, char in enumerate('abcdefghijklmnopqrstuvwxyz'):
-            if i < 26:
-                features[4 + i] = text.lower().count(char) / len(text)
-        
-        # Word frequency features (top words)
-        common_words = ['the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by']
-        for i, word in enumerate(common_words):
-            if i < 14:
-                features[30 + i] = words.count(word) / len(words)
-        
-        # Fill remaining with normalized hash values for some uniqueness
-        text_hash = hash(text)
-        for i in range(44, 384):
-            features[i] = ((text_hash + i) % 1000) / 1000.0
-        
-        return features
-    
-    async def similarity_search(self, query: str, documents: List[str], top_k: int = 5) -> List[Tuple[str, float]]:
-        """Find most similar documents to query"""
+        Args:
+            query: Search query
+            documents: List of documents with content
+            
+        Returns:
+            Documents with semantic scores
+        """
         if not documents:
-            return []
+            return documents
         
-        # Generate embeddings
-        all_texts = [query] + documents
-        embeddings = await self.embed_texts(all_texts)
-        
-        if not embeddings or len(embeddings) != len(all_texts):
-            logger.error("Failed to generate embeddings for similarity search")
-            return [(doc, 0.0) for doc in documents[:top_k]]
-        
-        query_embedding = embeddings[0]
-        doc_embeddings = embeddings[1:]
-        
-        # Calculate similarities
-        similarities = []
-        for i, doc_embedding in enumerate(doc_embeddings):
-            similarity = self._cosine_similarity(query_embedding, doc_embedding)
-            similarities.append((documents[i], similarity))
-        
-        # Sort by similarity and return top_k
-        similarities.sort(key=lambda x: x[1], reverse=True)
-        return similarities[:top_k]
+        try:
+            # Prepare texts for embedding
+            texts = [query]  # Query first
+            document_texts = [self._extract_document_text(doc) for doc in documents]
+            texts.extend(document_texts)
+            
+            # Generate embeddings
+            embeddings = await self.generate_embeddings(texts)
+            
+            if embeddings is None or len(embeddings) < 2:
+                logger.warning("Could not generate embeddings for similarity calculation.")
+                return documents
+            
+            # Calculate similarities
+            query_embedding = embeddings[0:1]  # First embedding is query
+            doc_embeddings = embeddings[1:]    # Rest are documents
+            
+            # Cosine similarity
+            similarities = cosine_similarity(query_embedding, doc_embeddings)[0]
+            
+            # Add scores to documents
+            scored_documents = []
+            for i, doc in enumerate(documents):
+                doc_with_score = doc.copy()
+                doc_with_score["semantic_score"] = float(similarities[i])
+                scored_documents.append(doc_with_score)
+            
+            # Sort by semantic score (descending)
+            scored_documents.sort(key=lambda x: x["semantic_score"], reverse=True)
+            
+            logger.info(f"Calculated semantic similarity for {len(scored_documents)} documents")
+            return scored_documents
+            
+        except Exception as e:
+            logger.error(f"Semantic similarity calculation failed: {e}")
+            return documents
     
-    def _cosine_similarity(self, vec1: List[float], vec2: List[float]) -> float:
-        """Calculate cosine similarity between two vectors"""
-        if not vec1 or not vec2 or len(vec1) != len(vec2):
-            return 0.0
+    def _extract_document_text(self, doc: Dict[str, Any]) -> str:
+        """Extract text from document for embedding"""
         
-        # Dot product
-        dot_product = sum(a * b for a, b in zip(vec1, vec2))
+        # Priority order for text extraction
+        text_fields = ["content", "markdown", "snippet", "title"]
         
-        # Magnitudes
-        magnitude1 = sum(a * a for a in vec1) ** 0.5
-        magnitude2 = sum(a * a for a in vec2) ** 0.5
+        text_parts = []
         
-        if magnitude1 == 0 or magnitude2 == 0:
-            return 0.0
+        # Add title with weight
+        title = doc.get("title", "")
+        if title:
+            text_parts.append(f"{title} {title}")  # Duplicate for emphasis
         
-        return dot_product / (magnitude1 * magnitude2)
+        # Add main content
+        for field in text_fields:
+            if field in doc and doc[field]:
+                text_parts.append(doc[field])
+                break
+        
+        # Add metadata if available
+        metadata = doc.get("metadata", {})
+        if isinstance(metadata, dict):
+            description = metadata.get("description", "")
+            if description:
+                text_parts.append(f"Description: {description}")
+        
+        return " ".join(text_parts)
     
-    async def get_status(self) -> Dict[str, Any]:
-        """Get status information about the embedding system"""
+    async def embed_query(self, query: str) -> Optional[np.ndarray]:
+        """Generate embedding for a single query"""
+        embeddings = await self.generate_embeddings([query])
+        return embeddings[0] if embeddings is not None else None
+    
+    def get_model_info(self) -> Dict[str, Any]:
+        """Get information about the current embedding model"""
         return {
-            "using_ollama": self._use_ollama,
-            "ollama_url": self.ollama_url if self._use_ollama else None,
-            "embedding_model": self.embedding_model if self._use_ollama else "cpu-fallback",
-            "max_chunk_size": self.max_chunk_size,
-            "fallback_type": "tfidf" if self._fallback_embedder else "simple"
+            "model_name": self.model_name,
+            "dimensions": self.dimensions,
+            "ollama_available": self.ollama_available,
+            "local_model_loaded": self._model_loaded,
+            "device": "cuda" if torch.cuda.is_available() else "cpu"
         }
+
+# Global embedding service instance
+embedding_service = AdvancedEmbeddingService()

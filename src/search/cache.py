@@ -5,11 +5,12 @@ import hashlib
 import time
 from typing import Any, Optional, Dict
 from datetime import datetime, timedelta
+from ..config.settings import settings
 
 logger = logging.getLogger(__name__)
 
 class SearchCache:
-    def __init__(self, redis_url: str = "redis://localhost:6379", default_ttl: int = 3600):
+    def __init__(self, redis_url: str = settings.REDIS_URL, default_ttl: int = 3600):
         self.redis_url = redis_url
         self.default_ttl = default_ttl
         self.redis_client = None
@@ -234,3 +235,5 @@ class SearchCache:
                 logger.warning(f"Erreur fermeture Redis: {e}")
         
         self.fallback_cache.clear()
+
+search_cache = SearchCache()
