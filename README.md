@@ -1,5 +1,7 @@
 # MCP Web Search Server 🔎
 
+[![GitHub Stars](https://img.shields.io/github/stars/Fouadbtlb/mcp-web-search?style=social)](https://github.com/Fouadbtlb/mcp-web-search)
+[![GitHub Release](https://img.shields.io/github/v/release/Fouadbtlb/mcp-web-search)](https://github.com/Fouadbtlb/mcp-web-search/releases)
 [![Docker Pulls](https://img.shields.io/docker/pulls/boutalebfouad/mcp-web-search)](https://hub.docker.com/r/boutalebfouad/mcp-web-search)  
 [![Image Size](https://img.shields.io/docker/image-size/boutalebfouad/mcp-web-search/latest)](https://hub.docker.com/r/boutalebfouad/mcp-web-search)  
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
@@ -222,13 +224,26 @@ docker build -t mcp-web-search:dev .
 
 ## 📄 Contributing
 
-Contributions are welcome. Please read `CONTRIBUTING.md` and add tests for behavior changes. Use feature branches and open a PR with a clear description.
+Contributions are welcome! Please check out the [GitHub repository](https://github.com/Fouadbtlb/mcp-web-search) to:
+- 🐛 Report bugs or request features via [Issues](https://github.com/Fouadbtlb/mcp-web-search/issues)
+- 🔀 Submit pull requests with improvements
+- 📖 Improve documentation
+- ⭐ Star the repo if you find it useful!
+
+---
+
+## 🤝 Support & Links
+
+- **📂 Source Code**: [GitHub Repository](https://github.com/Fouadbtlb/mcp-web-search)
+- **🐳 Docker Image**: [Docker Hub](https://hub.docker.com/r/boutalebfouad/mcp-web-search)
+- **🐛 Issues & Features**: [GitHub Issues](https://github.com/Fouadbtlb/mcp-web-search/issues)
+- **📋 MCP Protocol**: [Model Context Protocol](https://modelcontextprotocol.io)
 
 ---
 
 ## ⚖️ License
 
-This project is released under the **MIT License**. See `LICENSE` for details.
+This project is released under the **MIT License**. See [`LICENSE`](https://github.com/Fouadbtlb/mcp-web-search/blob/main/LICENSE) for details.
 
 ---
 
@@ -238,5 +253,5 @@ Built on top of: SearxNG, Ollama, FastAPI and the Model Context Protocol ecosyst
 
 ---
 
-**Made with ❤️ for the MCP ecosystem**
+**⭐ Star the [GitHub repo](https://github.com/Fouadbtlb/mcp-web-search) if you find this useful!**
 
