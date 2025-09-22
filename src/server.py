@@ -241,25 +241,26 @@ class WebSearchMCP:
                     return cached_results
             
             # Phase d'agrégation
-            search_results = await self.aggregator.search(
-                queries=expanded_queries,
-                sources=sources,
+            aggregator_result = await self.aggregator.search(
+                query=query,  # Use single query instead of queries list
                 max_results=n_results * 2,  # Chercher plus pour avoir du choix
-                freshness=freshness
+                search_mode="full",
+                use_cache=True
             )
             
-            if not search_results:
+            # Extract results from aggregator response
+            if not aggregator_result or not aggregator_result.get("results"):
                 logger.warning(f"Aucun résultat trouvé pour: {query}")
                 return {
                     "query": query,
                     "results": [],
                     "trace": {
                         "error": "No results found", 
-                        "sources_used": sources,
                         "timestamp": datetime.utcnow().isoformat()
                     }
                 }
             
+            search_results = aggregator_result["results"]
             logger.info(f"{len(search_results)} résultats bruts trouvés")
             
             # Filtrage et scoring des résultats

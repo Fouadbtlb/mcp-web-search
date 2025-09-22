@@ -133,6 +133,17 @@ class DocumentReranker:
             logger.error(f"Reranking failed: {e}")
             return documents
     
+    async def rerank(
+        self, 
+        query: str, 
+        documents: List[Dict[str, Any]], 
+        top_k: Optional[int] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        Alias for rerank_documents to match expected interface
+        """
+        return await self.rerank_documents(query, documents, top_k)
+    
     def _prepare_document_text(self, doc: Dict[str, Any]) -> str:
         """Prepare document text for reranking"""
         # Priority order for content

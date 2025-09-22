@@ -51,22 +51,24 @@ class SearchAggregator:
         # 2. Extract content
         # We run extraction in parallel for speed
         extraction_tasks = [
-            content_extractor.extract_and_process(
+            content_extractor.extract_content(
                 result["url"],
-                extraction_mode=settings.EXTRACTION_MODE,
-                llm_optimized=settings.LLM_OPTIMIZED_MARKDOWN,
+                html=None  # Will fetch HTML inside extract_content
             )
             for result in initial_results
         ]
-        extracted_docs = await asyncio.gather(*extraction_tasks)
+        extracted_docs = await asyncio.gather(*extraction_tasks, return_exceptions=True)
 
         # Filter out failed extractions and merge with initial results
         documents = []
         for i, doc in enumerate(extracted_docs):
-            if doc and doc.get("content"):
+            if not isinstance(doc, Exception) and doc and doc.get("content"):
                 # Merge metadata from initial result
-                doc.update(initial_results[i])
-                documents.append(doc)
+                merged_doc = {**initial_results[i], **doc}
+                documents.append(merged_doc)
+            elif not isinstance(doc, Exception):
+                # If extraction failed, keep original result without content
+                documents.append(initial_results[i])
         
         if not documents:
             logger.warning("Content extraction failed for all initial results.")
@@ -81,7 +83,7 @@ class SearchAggregator:
             documents = documents[:max_results]
 
         # 4. Reranking (if applicable)
-        if search_mode == "full" and settings.RERANKING_ENABLED:
+        if search_mode == "full" and settings.ENABLE_RERANKING:
             try:
                 documents = await document_reranker.rerank(query, documents)
                 # Trim to max_results after reranking
@@ -110,7 +112,7 @@ class SearchAggregator:
             "metadata": {
                 "result_count": len(results),
                 "embedding_model": settings.EMBEDDING_MODEL,
-                "reranker_model": settings.RERANKER_MODEL if settings.RERANKING_ENABLED else "N/A",
+                "reranker_model": settings.RERANKER_MODEL if settings.ENABLE_RERANKING else "N/A",
             },
         }
 

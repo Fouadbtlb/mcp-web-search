@@ -100,6 +100,93 @@ class ContentExtractor:
         except Exception as e:
             logger.error(f"Content extraction failed for {url}: {e}")
             return {"error": str(e), "url": url}
+
+    async def extract_for_llm(self, content: str, url: str, query: str = "") -> Dict[str, Any]:
+        """
+        Extract and optimize content specifically for LLM processing
+        This method provides a simplified interface that's expected by the server
+        """
+        try:
+            # If content is already HTML, parse it
+            if content.startswith('<'):
+                soup = BeautifulSoup(content, 'lxml')
+                
+                # Extract title
+                title_tag = soup.find('title')
+                title = title_tag.get_text().strip() if title_tag else ""
+                
+                # Extract main content
+                main_content = self._extract_main_content(soup)
+                
+                # Clean up the text
+                text_content = self._clean_text(main_content)
+                
+                return {
+                    "title": title,
+                    "content": text_content,
+                    "canonical_url": url,
+                    "word_count": len(text_content.split()),
+                    "language": "en",  # Default
+                    "author": "",
+                    "publish_date": ""
+                }
+            else:
+                # Content is already text
+                return {
+                    "title": "",
+                    "content": content,
+                    "canonical_url": url,
+                    "word_count": len(content.split()),
+                    "language": "en",
+                    "author": "",
+                    "publish_date": ""
+                }
+                
+        except Exception as e:
+            logger.error(f"extract_for_llm failed for {url}: {e}")
+            return {
+                "title": "",
+                "content": content[:1000] if content else "",  # Fallback to truncated content
+                "canonical_url": url,
+                "word_count": 0,
+                "language": "en",
+                "author": "",
+                "publish_date": ""
+            }
+    
+    def _extract_main_content(self, soup: BeautifulSoup) -> str:
+        """Extract main content from parsed HTML"""
+        # Try to find main content areas
+        content_selectors = [
+            'main', 'article', '.content', '.post', '.entry-content',
+            '#content', '#main-content', '.main-content'
+        ]
+        
+        main_content = None
+        for selector in content_selectors:
+            main_content = soup.select_one(selector)
+            if main_content:
+                break
+        
+        # Fallback to body if no main content found
+        if not main_content:
+            main_content = soup.find('body') or soup
+        
+        # Remove unwanted elements
+        for tag in main_content.find_all(['script', 'style', 'nav', 'header', 'footer', 'aside']):
+            tag.decompose()
+        
+        return main_content.get_text(strip=True)
+    
+    def _clean_text(self, text: str) -> str:
+        """Clean and normalize text content"""
+        # Remove extra whitespace
+        text = re.sub(r'\s+', ' ', text)
+        
+        # Remove special characters that might cause issues
+        text = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x84\x86-\x9f]', '', text)
+        
+        return text.strip()
     
     async def _fetch_html(self, url: str) -> Optional[str]:
         """Fetch HTML with anti-detection measures"""
